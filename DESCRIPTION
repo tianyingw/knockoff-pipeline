@@ -1,0 +1,39 @@
+Package: KnockoffPipeline
+Title: Knockoff-Based Genomic Analysis Pipeline
+Version: 0.1.0
+Authors@R: 
+    c(
+      person("Yujie", "Shen", 
+             email = "shenyj22@mails.tsinghua.edu.cn", 
+             role = c("aut", "cre")),
+      person("Shiyang", "Ma", 
+             role = "aut"),
+      person("Tianying", "Wang",
+             role = "aut")
+    )
+Description: 
+    Provides an end-to-end pipeline for large-scale genomic knockoff analysis.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports: 
+    SKAT,
+    Matrix,
+    WGScan,
+    SPAtest,
+    CompQuadForm,
+    irlba,
+    bigmemory,
+    data.table,
+    dplyr,
+    parallel,
+    qqman,
+    abind
+Suggests: 
+    testthat 
+Config/testthat/edition: 3
+Depends: 
+    R (>= 4.1.0)
+LazyData: true
+

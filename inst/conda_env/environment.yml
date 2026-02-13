@@ -1,0 +1,45 @@
+name: RSAIGE
+channels:
+  - conda-forge
+  - bioconda
+  - r
+  - defaults
+dependencies:
+  - python=3.12
+  - r-base=4.3.1
+
+  # 编译工具
+  - cmake
+  - make
+  - gcc
+  - gxx
+
+  # SAIGE / C++ 依赖
+  - savvy
+  - boost
+  - openblas
+  - zlib
+  - libcurl
+  - libxml2
+  - openssl
+  - superlu
+  - libdeflate
+
+  # R 依赖（关键）
+  - r-matrix
+  - r-rcpp
+  - r-rcpparmadillo
+  - r-rcppeigen
+  - r-data.table
+  - r-bh
+  - r-rsqlite
+  - r-devtools
+  - r-optparse
+  - r-skat
+  - r-spatest
+  - r-rcppparallel
+
+  - pip
+  - pip:
+      - cget
+      - click
