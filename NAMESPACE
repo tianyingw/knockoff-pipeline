@@ -3,6 +3,7 @@
 export(run_pipeline)
 import(CompQuadForm)
 import(Matrix)
+import(SAIGE)
 import(SKAT)
 import(SPAtest)
 import(WGScan)

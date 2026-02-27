@@ -1,175 +1,171 @@
-run_single_gene <- function(genes, kk, geno.file, obj_nullmodel, window_length, plink_prefix,M,genome_build,Gsub.id,sparseSigma=NULL,ratio=NULL) {
-   print(kk)
-   chr  <- as.numeric(gsub("chr", "", genes[kk, chr]))
-   gene_buffer_extension = 5000 + 50000   # default: +/- 5kb around gene + surrounding
-   start.buffer <- genes[kk, start] - 5000
-   end.buffer  <- genes[kk, end] + 5000
-   start.buffer.su <- genes[kk, start] - gene_buffer_extension
-   end.buffer.su  <- genes[kk, end] + gene_buffer_extension
-   gene_id <- genes[kk, id]
-   tmpdir <- tempdir()
+run_batch_gene <- function(
+  genes,
+  kk_vec,
+  geno.file,
+  obj_nullmodel,
+  window_length,
+  plink_prefix,
+  M,
+  genome_build,
+  Gsub.id,
+  abc_df,
+  gh_df,
+  sparseSigma=NULL,
+  ratio=NULL,
+  user_cores=1
+){
 
-   start_time <- proc.time()
-   # ---- extract genes buffer SNP ----
-   gene_prefix <- file.path(tmpdir, sprintf("temp_chr%d_buffer%d", chr, kk))
-   tryCatch({
-      system(sprintf("%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
-                  plink_prefix, geno.file, chr, start.buffer, end.buffer, gene_prefix))
-   }, error = function(e) {
-      message(e$message)
-      return(NULL)
-   })
-   # surrounding region snp
-   system(sprintf("%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
-                  plink_prefix, geno.file, chr, start.buffer.su, end.buffer.su, gene_prefix))
+  tmpdir <- tempdir()
+  chr <- as.numeric(gsub("chr", "", genes[kk_vec[1], chr]))
 
-   raw_file <- paste0(gene_prefix, ".raw")
-   raw <- data.table::fread(raw_file, data.table = FALSE)
+  gene_buffer_extension <- 5000 + 50000
 
-   unlink(paste0(gene_prefix, c(".raw", ".log", ".nosex")),
-          force = TRUE)
+  start_all <- min(genes[kk_vec, start]) - gene_buffer_extension
+  end_all   <- max(genes[kk_vec, end]) + gene_buffer_extension
 
-   if (ncol(raw) <= 6) return(NULL)
-   G_gene_buffer_surround <- as.matrix(raw[, -(1:6), drop = FALSE])
-   rm(raw)
+  batch_prefix <- file.path(tmpdir,
+                     sprintf("temp_chr%d_batch_%d_%d",
+                             chr,
+                             min(kk_vec),
+                             max(kk_vec)))
 
-   variants_gene_buffer_surround <- extract_position_universal(colnames(G_gene_buffer_surround))
-   variants_gene_buffer <- variants_gene_buffer_surround[
-     variants_gene_buffer_surround >= start.buffer & variants_gene_buffer_surround <= end.buffer]
-   if (length(variants_gene_buffer) == 0) return(NULL)
-   gene_buffer.pos <- c(min(variants_gene_buffer), max(variants_gene_buffer))
-   
-   # ---- extract genes enhancer SNP ----
-   if(genome_build == "hg19"){
-    abc_file_chr <- file.path(
-      system.file("extdata",package="KnockoffPipeline"),
-      genome_build,
-      paste0("ABC_combined_chr", chr, ".csv")
-    )
-    gh_file_chr <- file.path(
-      system.file("extdata",package="KnockoffPipeline"),
-      genome_build,
-      paste0("GH.data_chr", chr, ".csv")
-    )
-   }
-   abc_df <- fread(abc_file_chr)
-   gh_df <- fread(gh_file_chr)
+  ## ===== plink IO =====
+  system(sprintf(
+    "%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
+    plink_prefix, geno.file, chr,
+    start_all, end_all,
+    batch_prefix))
 
-   # ABC enhancer
-   abc_enhancers <- abc_df %>% 
-   filter(TargetGene == gene_id) %>% 
-   select(start, end) %>% 
-   mutate(source = "ABC")
-   
-   # GH enhancer
-   gh_enhancers <- gh_df %>% 
-   filter(gene == gene_id) %>% 
-   select(GH_start, GH_end) %>%
-   rename(start = GH_start, end = GH_end) %>%
-   mutate(source = "GH")
+  raw_file <- paste0(batch_prefix, ".raw")
+  raw <- data.table::fread(raw_file, data.table = FALSE)
 
-   enhancers <- bind_rows(abc_enhancers, gh_enhancers)
-   enhancers <- enhancers %>% distinct(start, end, .keep_all = TRUE)
-   rm(abc_df, gh_df); gc()
+  unlink(paste0(batch_prefix, c(".raw",".log",".nosex")),force=TRUE)
 
-   G_EnhancerAll_surround <- NULL
-   Enhancer.pos <- NULL
-   variants_EnhancerAll_surround <- NULL
-   p_EnhancerAll_surround <- NULL
-   p_EnhancerAll <- NULL
-   if(is.null(enhancers) || nrow(enhancers)==0){
+  if (ncol(raw) <= 6) return(NULL)
+
+  G_batch <- as.matrix(raw[, -(1:6), drop = FALSE])
+  variants_batch <- extract_position_universal(colnames(G_batch))
+  rm(raw); gc()
+
+  ## ===== batch 内并行 =====
+  safe_fun <- function(kk){
+
+    tryCatch({
+
+      gene_start <- genes[kk, start]
+      gene_end   <- genes[kk, end]
+      gene_id    <- genes[kk, id]
+
+      ## -------- gene buffer SNP --------
+      idx_gene <- which(variants_batch >= gene_start-5000 & variants_batch <= gene_end+5000)
+
+      if(length(idx_gene)==0) return(NULL)
+
+      G_gene <- G_batch[, idx_gene, drop=FALSE]
+      gene_buffer.pos <- c(min(variants_batch[idx_gene]),max(variants_batch[idx_gene]))
+
+      ## -------- enhancer --------
+      abc_enhancers <- abc_df[TargetGene == gene_id,.(start,end)]
+      gh_enhancers <- gh_df[gene == gene_id,.(start=GH_start,end=GH_end)]
+
+      enhancers <- unique(rbind(abc_enhancers, gh_enhancers))
+
+      G_EnhancerAll_surround <- NULL
+      variants_EnhancerAll_surround <- NULL
+      Enhancer.pos <- NULL
+      p_EnhancerAll_surround <- NULL
+      p_EnhancerAll <- NULL
       R <- 0
-   } else {
-      enhancer_surround_ext <- 5000
-      R <- 0
-      for(r in seq_len(nrow(enhancers))){
-         e_start <- as.integer(enhancers$start[r])
-         e_end   <- as.integer(enhancers$end[r])
-         esur_start <- max(1, e_start - enhancer_surround_ext)
-         esur_end   <- e_end + enhancer_surround_ext
-         gene_prefix <- file.path(tmpdir, sprintf("temp_chr%d_enhancer%d", chr, kk))
 
-         tryCatch({
-            system(sprintf("%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
-                        plink_prefix, geno.file, chr, esur_start, esur_end, gene_prefix))
-         }, error = function(e) {
-            # message(e$message)
-            next
-         })
+      if(nrow(enhancers)>0){
 
-         raw_file <- paste0(enhancer_prefix, ".raw")
-         raw <- data.table::fread(raw_file, data.table = FALSE)
+        for(r in seq_len(nrow(enhancers))){
 
-         unlink(paste0(enhancer_prefix,c(".raw",".log",".nosex")),force = TRUE)
+          e_start <- enhancers$start[r]
+          e_end   <- enhancers$end[r]
+          idx_e <- which(variants_batch >= e_start-5000 & variants_batch <= e_end+5000)
 
-         temp.G <- as.matrix(raw[, -(1:6)])
-         rm(raw)
-         temp.variants <- extract_position_universal(colnames(temp.G))
-         
-         variants_in_enhancer <- sum(temp.variants >= e_start & temp.variants <= e_end)
-         
-         if(variants_in_enhancer > 5) {
-            if (is.null(G_EnhancerAll_surround)) {
-               G_EnhancerAll_surround <- temp.G
-            } else {
-               G_EnhancerAll_surround <- cbind(G_EnhancerAll_surround, temp.G)
-            }
-            Enhancer.pos <- rbind(Enhancer.pos, c(e_start, e_end))
-            variants_EnhancerAll_surround <- c(variants_EnhancerAll_surround, temp.variants)
-            p_EnhancerAll_surround <- c(p_EnhancerAll_surround, length(temp.variants))
-            p_EnhancerAll <- c(p_EnhancerAll, variants_in_enhancer)
+          if(length(idx_e)>5){
+            temp.G <- G_batch[, idx_e, drop=FALSE]
+            G_EnhancerAll_surround <-cbind(G_EnhancerAll_surround, temp.G)
+            Enhancer.pos <-rbind(Enhancer.pos,c(e_start, e_end))
+            variants_EnhancerAll_surround <-c(variants_EnhancerAll_surround,variants_batch[idx_e])
+            p_EnhancerAll_surround <- c(p_EnhancerAll_surround, length(idx_e))
+            p_EnhancerAll <- c(p_EnhancerAll,sum(variants_batch[idx_e] >= e_start & variants_batch[idx_e] <= e_end))
+
             R <- R + 1
-         }
-         rm(temp.G);gc()
+          }
+        }
       }
-   }
-   # print("All information extracted.")
 
-   # ----  GeneScan3DKnock analysis ----
-   # print(dim(G_gene_buffer_surround))
-   # print(R)
-   # print(dim(G_EnhancerAll_surround))
-   if (length(sparseSigma) == 0 & length(ratio) == 0){
-      print("GeneScan3DKnock")
-      full_results <- GeneScan3D.KnockoffGeneration(G_gene_buffer_surround=G_gene_buffer_surround,
-                     variants_gene_buffer_surround=variants_gene_buffer_surround,
-                     gene_buffer.pos=gene_buffer.pos,promoter.pos=NULL,R=R,
-                     G_EnhancerAll_surround=G_EnhancerAll_surround,
-                     variants_EnhancerAll_surround=variants_EnhancerAll_surround,
-                     p_EnhancerAll_surround=p_EnhancerAll_surround,
-                     Enhancer.pos=Enhancer.pos,p.EnhancerAll=p_EnhancerAll,
-                     Z=NULL,Z.promoter=NULL,Z.EnhancerAll=NULL,
-                     window.size=window_length,result.null.model=obj_nullmodel,M=M,Gsub.id=Gsub.id)
-   } else {
-      print("BIGKnock")
-      full_results <- GeneScan3D.UKB.GLMM.KnockoffGeneration(G_gene_buffer_surround=G_gene_buffer_surround,
-                                             variants_gene_buffer_surround=variants_gene_buffer_surround,
-                                             gene_buffer.pos=gene_buffer.pos,R=R,
-                                             G_EnhancerAll_surround=G_EnhancerAll_surround,
-                                             variants_EnhancerAll_surround=variants_EnhancerAll_surround,
-                                             p_EnhancerAll_surround=p_EnhancerAll_surround,
-                                             Enhancer.pos=Enhancer.pos,p.EnhancerAll=p_EnhancerAll,
-                                             window.size=window_length,result.null.model=obj_nullmodel,M=M,Gsub.id=Gsub.id,
-                                             sparseSigma=sparseSigma,ratio=ratio)
+      ## -------- GeneScan --------
+      if (is.null(sparseSigma)) {
 
-   }
-   
-   end_time <- proc.time()
-   
-   print(end_time - start_time)
-   results <- data.frame(
-      chr = chr,
-      gene_id = gene_id,                   
-      gene_start = genes[kk, start],        
-      gene_end = genes[kk, end],         
-      GeneScan3D.Cauchy = full_results$GeneScan3D.Cauchy[1],  
-      t(full_results$GeneScan3D.Cauchy_knockoff[, 1, drop = FALSE]), 
-      stringsAsFactors = FALSE              
-   )
-   colnames(results)[6:ncol(results)] <- paste0("GeneScan3D.Cauchy_knockoff_", 1:M)
-   rm(G_gene_buffer_surround,G_EnhancerAll_surround);gc()
-   return(list(result = results))
+        full_results <- GeneScan3D.KnockoffGeneration(
+          G_gene_buffer_surround=G_gene,
+          variants_gene_buffer_surround=variants_batch[idx_gene],
+          gene_buffer.pos=gene_buffer.pos,
+          R=R,
+          G_EnhancerAll_surround=G_EnhancerAll_surround,
+          variants_EnhancerAll_surround=variants_EnhancerAll_surround,
+          p_EnhancerAll_surround=p_EnhancerAll_surround,
+          Enhancer.pos=Enhancer.pos,
+          p.EnhancerAll=p_EnhancerAll,
+          window.size=window_length,
+          result.null.model=obj_nullmodel,
+          M=M,
+          Gsub.id=Gsub.id)
+
+      } else {
+
+        full_results <- GeneScan3D.UKB.GLMM.KnockoffGeneration(
+          G_gene_buffer_surround=G_gene,
+          variants_gene_buffer_surround=variants_batch[idx_gene],
+          gene_buffer.pos=gene_buffer.pos,
+          R=R,
+          G_EnhancerAll_surround=G_EnhancerAll_surround,
+          variants_EnhancerAll_surround=variants_EnhancerAll_surround,
+          p_EnhancerAll_surround=p_EnhancerAll_surround,
+          Enhancer.pos=Enhancer.pos,
+          p.EnhancerAll=p_EnhancerAll,
+          window.size=window_length,
+          result.null.model=obj_nullmodel,
+          M=M,
+          Gsub.id=Gsub.id,
+          sparseSigma=sparseSigma,
+          ratio=ratio)
+      }
+
+      results <- data.frame(
+        chr = chr,
+        gene_id = gene_id,
+        gene_start = gene_start,
+        gene_end = gene_end,
+        GeneScan3D.Cauchy = full_results$GeneScan3D.Cauchy[1],
+        t(full_results$GeneScan3D.Cauchy_knockoff[,1,drop=FALSE]),
+        stringsAsFactors = FALSE
+      )
+
+      colnames(results)[6:ncol(results)] <- paste0("GeneScan3D.Cauchy_knockoff_",1:M)
+
+      return(results)
+
+    }, error=function(e) NULL)
+  }
+
+  out <- mclapply(kk_vec,
+                  safe_fun,
+                  mc.cores=user_cores)
+
+  out <- Filter(Negate(is.null), out)
+
+  rm(G_batch); gc()
+
+  if(length(out)==0) return(NULL)
+
+  return(data.table::rbindlist(out, fill=TRUE))
 }
+
 
 GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(G_gene_buffer_surround=G_gene_buffer_surround,
                                                    variants_gene_buffer_surround=variants_gene_buffer_surround,

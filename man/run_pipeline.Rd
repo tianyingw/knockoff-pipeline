@@ -22,7 +22,9 @@ run_pipeline(
   grm_file = NULL,
   grm_id_file = NULL,
   fdr = 0.1,
-  chromosomes = 1:22
+  chromosomes = 1:22,
+  batch_size = 20,
+  read_mid_exist = TRUE
 )
 }
 \arguments{
@@ -58,8 +60,13 @@ run_pipeline(
 
 \item{grm_id_file}{Sparse GRM ID file.}
 
-\item{fdr}{Target FDR level.
-#' @param chromosomes Chromosomes to analyze. NULL or "all" = all autosomes in reference.}
+\item{fdr}{Target FDR level.}
+
+\item{chromosomes}{Chromosomes to analyze. NULL or "all" = all autosomes in reference.}
+
+\item{batch_size}{Number of genes to process in each batch for gene-centric analysis.}
+
+\item{read_mid_exist}{Logical. Whether to read existing mid results if available.}
 }
 \description{
 Main entry function for knockoffPipeline.

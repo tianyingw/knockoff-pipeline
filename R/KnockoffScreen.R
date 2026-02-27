@@ -587,7 +587,7 @@ sparse.cov.cross <- function(x,y){
 }
 
 
-max.nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
+max_nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
 
 Get.p.base<-function(X,result.prelim){
   #X<-Matrix(X)
@@ -642,7 +642,7 @@ MK.statistic<-function (T_0,T_k,method='median'){
   }
   kappa<-apply(T.temp,1,which.max.alt)-1
 
-  if(method=='max'){tau<-apply(T.temp,1,max)-apply(T.temp,1,max.nth,n=2)}
+  if(method=='max'){tau<-apply(T.temp,1,max)-apply(T.temp,1,max_nth,n=2)}
   if(method=='median'){
     Get.OtherMedian<-function(x){median(x[-which.max(x)])}
     tau<-apply(T.temp,1,max)-apply(T.temp,1,Get.OtherMedian)

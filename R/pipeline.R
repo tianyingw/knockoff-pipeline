@@ -19,7 +19,9 @@
 #' @param grm_file Sparse GRM file for GLMM.
 #' @param grm_id_file Sparse GRM ID file.
 #' @param fdr Target FDR level.
-#' #' @param chromosomes Chromosomes to analyze. NULL or "all" = all autosomes in reference.
+#' @param chromosomes Chromosomes to analyze. NULL or "all" = all autosomes in reference.
+#' @param batch_size Number of genes to process in each batch for gene-centric analysis.
+#' @param read_mid_exist Logical. Whether to read existing mid results if available.
 #'
 #' @import SKAT
 #' @import Matrix
@@ -33,6 +35,7 @@
 #' @import parallel
 #' @import qqman
 #' @import abind
+#' @import SAIGE
 #' @export
 run_pipeline <- function(
   outdir,
@@ -52,11 +55,13 @@ run_pipeline <- function(
   grm_file = NULL,
   grm_id_file = NULL,
   fdr = 0.1,
-  chromosomes = 1:22
+  chromosomes = 1:22,
+  batch_size = 20,
+  read_mid_exist = TRUE
 ) {
 
   ## -----------------------------
-  ## 1. Validation
+  ## Validation
   ## -----------------------------
 
   if (!test_type %in% c("Single_Window","Gene_Centric"))
@@ -72,7 +77,7 @@ run_pipeline <- function(
     Sys.setenv(MKL_NUM_THREADS = 1)
 
   ## -----------------------------
-  ## 2. Fit null model 
+  ## Fit null model 
   ## -----------------------------
 
   pheno <- data.table::fread(pheno_file)
@@ -151,6 +156,23 @@ run_pipeline <- function(
 
       message("Processing chromosome ", c)
 
+      single_mid_file <- file.path(
+        mid_dir,
+        paste0("Single_mid_results_chr",c,".txt")
+      )
+      window_mid_file <- file.path(
+        mid_dir,
+        paste0("Window_mid_results_chr",c,".txt")
+      )
+
+      if (read_mid_exist &&
+          file.exists(single_mid_file) &&
+          file.exists(window_mid_file)) {
+
+        message("Mid results exist. Skip chromosome ", c)
+        next
+      }
+
       block_chr <- blocks[blocks$chr==c]
       sub_seq_id <- seq_len(nrow(block_chr))
 
@@ -197,13 +219,13 @@ run_pipeline <- function(
 
     ## merge
     result.single.all <- data.table::rbindlist(
-      lapply(chr_vector,function(c)
+      lapply(unique_chr,function(c)
         data.table::fread(file.path(mid_dir,
           paste0("Single_mid_results_chr",c,".txt")))),
       fill=TRUE)
 
     result.window.all <- data.table::rbindlist(
-      lapply(chr_vector,function(c)
+      lapply(unique_chr,function(c)
         data.table::fread(file.path(mid_dir,
           paste0("Window_mid_results_chr",c,".txt")))),
       fill=TRUE)
@@ -246,64 +268,71 @@ run_pipeline <- function(
 
       message("Processing chromosome ",c)
 
-      chr_genes <- genes_info[chr==c]
-      sub_seq_id <- seq_len(nrow(chr_genes))
+      mid_file_chr <- file.path(
+        mid_dir,
+        paste0("GeneCentric_mid_results_chr",c,".txt")
+      )
 
-      safe_fun <- function(kk){
-
-        tryCatch({
-
-          if (sample_uncorrelated) {
-
-            run_single_gene(
-              genes = chr_genes,
-              kk = kk,
-              geno.file = geno_file,
-              obj_nullmodel = nullobj,
-              window_length = sliding_window_length,
-              plink_prefix = plink_path,
-              M = M,
-              genome_build = genome_build,
-              Gsub.id = Gsub.id
-            )
-
-          } else {
-
-            run_single_gene(
-              genes = chr_genes,
-              kk = kk,
-              geno.file = geno_file,
-              obj_nullmodel =
-                nullobj_results$result.null.model.GLMM,
-              window_length = sliding_window_length,
-              plink_prefix = plink_path,
-              M = M,
-              genome_build = genome_build,
-              Gsub.id = Gsub.id,
-              sparseSigma = nullobj_results$sparseSigma,
-              ratio = nullobj_results$ratio
-            )
-          }
-
-        }, error=function(e) NULL)
+      if (read_mid_exist && file.exists(mid_file_chr)) {
+        message("Mid result exists. Skip chromosome ",c)
+        next
       }
 
-      out <- mclapply(sub_seq_id,
-                      safe_fun,
-                      mc.cores=user_cores)
+      chr_genes <- genes_info[chr==c]
+      n_gene <- nrow(chr_genes)
 
-      out <- Filter(Negate(is.null), out)
-      if (length(out)==0) next
+      ## ===== enhancer =====
+      if(genome_build == "hg19"){
+        abc_file_chr <- file.path(
+          system.file("extdata",package="KnockoffPipeline"),
+          genome_build,
+          paste0("ABC_combined_chr", c, ".csv")
+        )
+        gh_file_chr <- file.path(
+          system.file("extdata",package="KnockoffPipeline"),
+          genome_build,
+          paste0("GH.data_chr", c, ".csv")
+        )
+      }
 
-      result_chr <- data.table::rbindlist(
-        lapply(out, `[[`, "result"), fill=TRUE)
+      abc_df <- data.table::fread(abc_file_chr)
+      gh_df  <- data.table::fread(gh_file_chr)
+      
+      ## ====== split batch ======
+      batch_index <- split(seq_len(n_gene),
+                          ceiling(seq_len(n_gene)/batch_size))
 
-      data.table::fwrite(result_chr,
-        file.path(mid_dir,
-          paste0("GeneCentric_mid_results_chr",c,".txt")),
-        sep="\t")
+      result_list_chr <- list()
 
-      rm(out,result_chr); gc()
+      for (b in seq_along(batch_index)) {
+
+        message("Running batch ", b, "/", length(batch_index))
+
+        idx_batch <- batch_index[[b]]
+
+        batch_res <- run_batch_gene(
+          genes = chr_genes,
+          kk_vec = idx_batch,
+          geno.file = geno_file,
+          obj_nullmodel = obj_nullmodel,
+          window_length = sliding_window_length,
+          plink_prefix = plink_path,
+          M = M,
+          genome_build = genome_build,
+          Gsub.id = Gsub.id,
+          sparseSigma = if(!sample_uncorrelated) nullobj_results$sparseSigma else NULL,
+          ratio = if(!sample_uncorrelated) nullobj_results$ratio else NULL,
+          user_cores = user_cores
+        )
+        result_list_chr[[b]] <- batch_res
+        gc()
+      }
+
+      result_chr <- data.table::rbindlist(result_list_chr, fill=TRUE)
+
+      data.table::fwrite(result_chr, mid_file_chr, sep="\t")
+
+      rm(result_list_chr, result_chr); gc()
     }
 
     result.all <- data.table::rbindlist(

@@ -1028,5 +1028,5 @@ sparse.cov.cross <- function(x,y){
   covmat <- (as.matrix(crossprod(x,y)) - n*tcrossprod(cMeans.x,cMeans.y))/(n-1)
   list(cov=covmat)
 }
-max.nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
+max_nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
 
