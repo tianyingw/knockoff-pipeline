@@ -1,6 +1,19 @@
-# Individual Statistics Pipeline
+# Knockoff Pipeline for Individual Statistics
 
-This repository provides a unified interface for performing SNP-level, window-based, and gene-centric association inference using knockoff-based or SCANG-based methods. It supports both **uncorrelated** and **correlated** samples, integrates SAIGE for mixed-model GWAS, and provides automated FDR control.
+## Overview
+
+This R package provides a unified pipeline for genome-wide statistical inference using knockoff-based methods.
+
+The pipeline supports:
+
+- SNP-level window inference (**Single_Window**)
+- Gene-centric inference (**Gene_Centric**)
+- Correlated and uncorrelated sample analysis
+- Mixed-model GWAS integration
+- Automatic FDR control
+- Batch processing with checkpoint recovery
+
+---
 
 ## Supported Methods
 
@@ -14,7 +27,15 @@ This repository provides a unified interface for performing SNP-level, window-ba
 
 # Installation
 
-## 1. Install SAIGE (with conda environment)
+## 1. Install System Dependencies
+
+### Required external software
+
+- PLINK2
+
+Ensure PLINK path is included in system `PATH`
+
+## 2. Install SAIGE (with conda environment)
 
 ```bash
 conda env create -f environment-RSAIGE.yml
@@ -24,7 +45,7 @@ export LDFLAGS="-L${FLAGPATH}/lib"
 export CPPFLAGS="-I${FLAGPATH}/include"
 ```
 
-## 2. Install Dependencies
+## 3. Install Other Dependencies
 
 ```bash
 Rscript install_packages.R
@@ -65,46 +86,52 @@ Rscript install_packages.R
 
 # Pipeline Usage
 
+## Load package
+
+```R
+library(KnockoffPipeline)
+```
+
 ## SNP-level and window-based inference (Uncorrelated Samples)
 
-```bash
-Rscript pipeline.R \
-  --outdir result/ \
-  --test_type Single_Window \
-  --pheno_file $pheno_file \
-  --grm_file $grm_file \
-  --geno_file $geno_file \
-  --phenotype Y \
-  --pheno_id id \
-  --covariates X1 \
-  --user_cores 4 \
-  --sliding_window_length 1000,5000,10000 \
-  --geno_missing_imputation fixed \
-  --plink_path plink \
-  --M 5 \
-  --genome_build hg19 \
-  --sample_uncorrelated TRUE \
-  --fdr 0.1
+```R
+run_pipeline(
+  outdir = "output/",
+  test_type = "Single_Window",
+  pheno_file = "phenotype.csv",
+  geno_file = "geno_prefix",
+  phenotype = "Y",
+  pheno_id = "eid",
+  covariates = c("age","sex","PC1","PC2"),
+  user_cores = 4,
+  sliding_window_length = c(1000,5000,10000),
+  M = 5,
+  genome_build = "hg19",
+  sample_uncorrelated = TRUE,
+  fdr = 0.1
+)
 ```
 
 ---
 
 ## Gene-Centric Inference (Uncorrelated Samples)
 
-```bash
-Rscript pipeline.R \
-  --outdir result_gene/ \
-  --test_type Gene_Centric \
-  --pheno_file $pheno_file \
-  --geno_file $geno_file \
-  --phenotype Y \
-  --pheno_id id \
-  --covariates X1,X2 \
-  --sliding_window_length 1000,5000,10000 \
-  --genome_build hg19 \
-  --sample_uncorrelated TRUE \
-  --M 5 \
-  --fdr 0.1
+```R
+run_pipeline(
+  outdir = "output/",
+  test_type = "Gene_Centric",
+  pheno_file = "phenotype.csv",
+  geno_file = "geno_prefix",
+  phenotype = "Y",
+  pheno_id = "eid",
+  covariates = c("age","sex","PC1","PC2"),
+  user_cores = 4,
+  sliding_window_length = c(1000,5000,10000),
+  M = 5,
+  genome_build = "hg19",
+  sample_uncorrelated = TRUE,
+  fdr = 0.1
+)
 ```
 
 ---
@@ -113,21 +140,41 @@ Rscript pipeline.R \
 
 If `--grm_file` is not provided, the pipeline will generate GRM using SAIGE automatically.
 
-```bash
-Rscript pipeline.R \
-  --outdir result_bigknock/ \
-  --test_type Gene_Centric \
-  --pheno_file $pheno_file \
-  --grm_file $grm_file \
-  --grm_id_file $grm_id_file \
-  --geno_file $geno_file \
-  --phenotype Y \
-  --pheno_id id \
-  --covariates age,sex,PC1,PC2 \
-  --genome_build hg38 \
-  --sample_uncorrelated FALSE \
-  --M 5 \
-  --fdr 0.1
+```R
+run_pipeline(
+  outdir = "output/",
+  test_type = "Gene_Centric",
+  pheno_file = "phenotype.csv",
+  geno_file = "geno_prefix",
+  phenotype = "Y",
+  pheno_id = "eid",
+  covariates = c("age","sex","PC1","PC2"),
+  user_cores = 4,
+  sliding_window_length = c(1000,5000,10000),
+  M = 5,
+  genome_build = "hg19",
+  sample_uncorrelated = FALSE,
+  grm_file = "sparseGRM.mtx",
+  grm_id_file = "sampleIDs.txt"
+  fdr = 0.1
+)
+```
+
+## Checkpoint Recovery
+
+The pipeline supports restart from intermediate results.
+
+Set:
+```R
+read_mid_exist = TRUE
+```
+Then pipeline will detect existing mid-results and skip finished chromosomes.
+
+## Parallel Computing
+
+Parallelization is supported via:
+```R
+user_cores = N
 ```
 
 ---
@@ -148,21 +195,4 @@ Each pipeline run outputs:
 
 ---
 
-# Example Directory Structure
 
-```
-project/
-├── data/
-│   ├── genotype.bed
-│   ├── genotype.bim
-│   ├── genotype.fam
-│   ├── phenotype.txt
-│   └── grm/
-├── R/
-│   ├── pipeline.R
-│   └── install_packages.R
-└── result/
-    ├── Single_results_chr1.csv
-    ├── Window_results_chr1.csv
-    └── Gene_results_chr1.csv
-```
