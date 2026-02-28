@@ -59,27 +59,27 @@ Rscript install_packages.R
 
 | Argument                | Description                                                     |
 | ----------------------- | --------------------------------------------------------------- |
-| `--pheno_file`          | Phenotype file (CSV/TSV) containing ID column                   |
-| `--geno_file`           | Genotype file prefix in PLINK bed/bim/fam format                |
-| `--phenotype`           | Column name of phenotype                                        |
-| `--genome_build`        | "hg19" or "hg38"                                                |
-| `--sample_uncorrelated` | TRUE/FALSE                                                      |
+| `outdir`          | Output directory                   |
+| `test_type`          | "Single_Window" or "Gene_Centric"                   |
+| `pheno_file`          | Phenotype file (CSV/TSV) containing ID column                   |
+| `geno_file`           | Genotype file prefix in PLINK bed/bim/fam format                |
+| `phenotype`           | Column name of phenotype                                        |
 
 ### Optional Inputs
 
 | Argument                    | Description                                                                                                                                | Default             |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------- |
-| `--sliding_window_length`   | Comma-separated list of window sizes (in bp) for window-based inference. **Only used when** `--test_type = "Single_Window"`. | `"1000,5000,10000"` |
-| `--M`                       | Number of knockoff copies.                | `5`                 |
-| `--geno_missing_imputation` | Missing genotype imputation method (`fixed` or `mean`).                                                                                    | `"fixed"`           |
-| `--plink_path`              | Path to PLINK executable.                                                                                                              | `"plink"`           |
-| `--genome_build`            | Genome build (`hg19`, `hg38`) used for annotation and window mapping.                                                                      | `"hg19"`            |
-| `--sample_uncorrelated`     | Whether samples are uncorrelated (TRUE/FALSE).               | `TRUE`              |
-| `--fdr`                     | Target false discovery rate.                                                                                                               | `0.1`               |
-| `--grm_file`                | GRM matrix (`.grm` + `.grm.id`) **required only for correlated sample methods**, e.g., **BIGKnock**. Ignored otherwise.                    | `NULL`              |
-| `--pheno_id`                | Column name of sample ID in phenotype file. Required when phenotype table contains ID-like columns.           | `NULL`              |
-| `--covariates`              | Comma-separated covariate names. Optional for all methods; used only when covariates are included in association models.                   | `NULL`              |
-| `--user_cores`              | Number of CPU threads used.                                                                                                                | `1`                 |
+| `sliding_window_length`   | Comma-separated list of window sizes (in bp) for window-based inference. **Only used when** `--test_type = "Single_Window"`. | `"1000,5000,10000"` |
+| `M`                       | Number of knockoff copies.                | `5`                 |
+| `geno_missing_imputation` | Missing genotype imputation method (`fixed` or `mean`).                                                                                    | `"fixed"`           |
+| `plink_path`              | Path to PLINK executable.                                                                                                              | `"plink"`           |
+| `genome_build`            | Genome build (`hg19`, `hg38`) used for annotation and window mapping.                                                                      | `"hg19"`            |
+| `sample_uncorrelated`     | Whether samples are uncorrelated (TRUE/FALSE).               | `TRUE`              |
+| `fdr`                     | Target false discovery rate.                                                                                                               | `0.1`               |
+| `grm_file`                | GRM matrix (`.grm` + `.grm.id`) **required only for correlated sample methods**, e.g., **BIGKnock**. Ignored otherwise.                    | `NULL`              |
+| `pheno_id`                | Column name of sample ID in phenotype file. Required when phenotype table contains ID-like columns.           | `NULL`              |
+| `covariates`              | Comma-separated covariate names. Optional for all methods; used only when covariates are included in association models.                   | `NULL`              |
+| `user_cores`              | Number of CPU threads used.                                                                                                                | `1`                 |
 
 
 ---
