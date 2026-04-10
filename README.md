@@ -99,6 +99,7 @@ library(KnockoffPipeline)
 ## SNP-level and window-based inference (Uncorrelated Samples)
 
 We provide a demo at `inst/examples/SNP_Window.R`
+
 ---
 
 ## Gene-Centric Inference (Uncorrelated Samples)
