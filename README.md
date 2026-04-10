@@ -50,7 +50,11 @@ export CPPFLAGS="-I${FLAGPATH}/include"
 ```bash
 Rscript install_packages.R
 ```
+## 4. Install Package
 
+```R
+devtools::install_github("tianyingw/knockoff-pipeline")
+```
 ---
 
 # Input Requirements
@@ -94,45 +98,12 @@ library(KnockoffPipeline)
 
 ## SNP-level and window-based inference (Uncorrelated Samples)
 
-```R
-run_pipeline(
-  outdir = "output/",
-  test_type = "Single_Window",
-  pheno_file = "phenotype.csv",
-  geno_file = "geno_prefix",
-  phenotype = "Y",
-  pheno_id = "eid",
-  covariates = c("age","sex","PC1","PC2"),
-  user_cores = 4,
-  sliding_window_length = c(1000,5000,10000),
-  M = 5,
-  genome_build = "hg19",
-  sample_uncorrelated = TRUE,
-  fdr = 0.1
-)
-```
-
+We provide a demo at `inst/examples/SNP_Window.R`
 ---
 
 ## Gene-Centric Inference (Uncorrelated Samples)
 
-```R
-run_pipeline(
-  outdir = "output/",
-  test_type = "Gene_Centric",
-  pheno_file = "phenotype.csv",
-  geno_file = "geno_prefix",
-  phenotype = "Y",
-  pheno_id = "eid",
-  covariates = c("age","sex","PC1","PC2"),
-  user_cores = 4,
-  sliding_window_length = c(1000,5000,10000),
-  M = 5,
-  genome_build = "hg19",
-  sample_uncorrelated = TRUE,
-  fdr = 0.1
-)
-```
+We provide a demo at `inst/examples/Gene_unrelated.R`
 
 ---
 
@@ -140,25 +111,7 @@ run_pipeline(
 
 If `--grm_file` is not provided, the pipeline will generate GRM using SAIGE automatically.
 
-```R
-run_pipeline(
-  outdir = "output/",
-  test_type = "Gene_Centric",
-  pheno_file = "phenotype.csv",
-  geno_file = "geno_prefix",
-  phenotype = "Y",
-  pheno_id = "eid",
-  covariates = c("age","sex","PC1","PC2"),
-  user_cores = 4,
-  sliding_window_length = c(1000,5000,10000),
-  M = 5,
-  genome_build = "hg19",
-  sample_uncorrelated = FALSE,
-  grm_file = "sparseGRM.mtx",
-  grm_id_file = "sampleIDs.txt"
-  fdr = 0.1
-)
-```
+We provide a demo at `inst/examples/Gene_related.R`
 
 ## Checkpoint Recovery
 

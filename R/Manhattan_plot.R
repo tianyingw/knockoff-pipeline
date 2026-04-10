@@ -11,7 +11,7 @@ plot_manhattan <- function(result_all, out_path, title = 'Manhattan plot (W stat
   manhattan_data$P[!is.finite(manhattan_data$P)] <- max_finite
   
   threshold <- result_all[,"W_Threshold"][1]
-  png(paste0(out_path, title), width = 1200, height = 600, res = 150) 
+  png(file.path(out_path, title), width = 1200, height = 600, res = 150) 
   manhattan(
       manhattan_data,
       chr = 'CHR',

@@ -46,7 +46,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       warning(msg,call.=F)
       next
     }
-    # G<-G[,SNP.index,drop=F];beta<-beta[SNP.index,]
+    G<-G[,SNP.index,drop=F]#;beta<-beta[SNP.index,]
     # pos<-as.numeric(gsub("^X8\\.","",colnames(G)))
     pos <- as.numeric(colnames(G))
     if(length(beta)==0){beta<-rep(0,ncol(G))}

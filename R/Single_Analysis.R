@@ -1,6 +1,5 @@
 run_single_block <- function(blocks, kk, geno.file, obj_nullmodel, window_length, plink_prefix,
                               impute.method, M, Gsub.id) {
-  print(kk)
   chr   <- blocks[kk, chr]
   start <- blocks[kk, start]
   stop  <- blocks[kk, stop]
@@ -8,16 +7,23 @@ run_single_block <- function(blocks, kk, geno.file, obj_nullmodel, window_length
   tmpdir <- tempdir()
   block_prefix <- file.path(tmpdir, sprintf("temp_chr%d_block%d", chr, kk))
 
-  system(sprintf("%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
-                  plink_prefix, geno.file, chr, start, stop, block_prefix))
+  cmd <- sprintf(
+    "%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
+    plink_prefix, geno.file, chr, start, stop, block_prefix
+  )
+
+  system(paste(cmd, "2>/dev/null"), ignore.stdout = TRUE)
 
   # ---- geno df ----
   raw_file <- paste0(block_prefix, ".raw")
+  if (!file.exists(raw_file)) 
+    return(NULL)
   raw <- data.table::fread(raw_file, data.table = FALSE)
   unlink(paste0(block_prefix, c(".raw", ".log", ".nosex")),force = TRUE)
   
   if (ncol(raw) <= 6)
     return(NULL)
+  print(kk)
   df <- as.matrix(raw[, -(1:6), drop = FALSE])
   rm(raw)
   cat(sprintf("chr: %s, start: %d, end: %d, snp count: %d\n", chr, start, stop, ncol(df)))
