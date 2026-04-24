@@ -11,63 +11,134 @@ run_pipeline(
   geno_file,
   phenotype,
   pheno_id = NULL,
-  covariates = NULL,
-  user_cores = 1,
+  covar_cols = NULL,
+  cat_covar_cols = NULL,
+  user_cores = 1L,
   sliding_window_length = NULL,
   geno_missing_imputation = "fixed",
   plink_path = "plink",
-  M = 5,
+  M = 5L,
   genome_build = "hg19",
   sample_uncorrelated = TRUE,
   grm_file = NULL,
   grm_id_file = NULL,
   fdr = 0.1,
   chromosomes = 1:22,
-  batch_size = 20,
-  read_mid_exist = TRUE
+  batch_size = 20L,
+  read_mid_exist = TRUE,
+  pipeline_stage = "full",
+  save_knockoff = NULL,
+  knockoff_dir = NULL
 )
 }
 \arguments{
-\item{outdir}{Output directory.}
+\item{outdir}{Character. Output directory (created recursively if absent).}
 
-\item{test_type}{Either "Single_Window" or "Gene_Centric".}
+\item{test_type}{Character. One of \code{"Single_Window"} or
+\code{"Gene_Centric"}.}
 
-\item{pheno_file}{Path to phenotype file.}
+\item{pheno_file}{Character. Path to the phenotype file (tab- or
+comma-separated).}
 
-\item{geno_file}{PLINK genotype prefix (without extension).}
+\item{geno_file}{Character. PLINK genotype file prefix (no extension).}
 
-\item{phenotype}{Column name of phenotype.}
+\item{phenotype}{Character \strong{vector} of phenotype column name(s).
+When multiple phenotypes are provided, samples with missing values in
+\emph{any} phenotype or covariate are removed once before any analysis,
+knockoffs are generated on the first pass and automatically reused for
+subsequent phenotypes (requires \code{save_knockoff = TRUE} or
+\code{NULL}).}
 
-\item{pheno_id}{Optional sample ID column.}
+\item{pheno_id}{Character or \code{NULL}. Column name of the sample ID
+in the phenotype file. \code{NULL} assumes rows are already aligned with
+the PLINK \code{.fam} file.}
 
-\item{covariates}{Character vector of covariate column names.}
+\item{covar_cols}{Character vector of continuous covariate column names,
+or \code{NULL}.}
 
-\item{user_cores}{Number of cores for parallelization within chromosome.}
+\item{cat_covar_cols}{Character vector of binary/categorical covariate column
+names, or \code{NULL}.}
 
-\item{sliding_window_length}{Sliding window size.}
+\item{user_cores}{Integer. Number of parallel cores. Default \code{1}.}
 
-\item{geno_missing_imputation}{Imputation method.}
+\item{sliding_window_length}{Integer or \code{NULL}. Sliding window size (bp).}
 
-\item{plink_path}{Path to plink executable.}
+\item{geno_missing_imputation}{Character. Genotype imputation method.
+Default \code{"fixed"}.}
 
-\item{M}{Number of knockoffs.}
+\item{plink_path}{Character. Path to PLINK executable. Default
+\code{"plink"}.}
 
-\item{genome_build}{"hg19" or "hg38".}
+\item{M}{Integer. Number of knockoff copies. Default \code{5}.}
 
-\item{sample_uncorrelated}{Logical. TRUE = standard null model.}
+\item{genome_build}{Character. One of \code{"hg19"} or \code{"hg38"}.}
 
-\item{grm_file}{Sparse GRM file for GLMM.}
+\item{sample_uncorrelated}{Logical. \code{TRUE} fits a standard null model;
+\code{FALSE} fits a GLMM via SAIGE.}
 
-\item{grm_id_file}{Sparse GRM ID file.}
+\item{grm_file}{Character or \code{NULL}. Path to the sparse GRM file.}
 
-\item{fdr}{Target FDR level.}
+\item{grm_id_file}{Character or \code{NULL}. Path to the sparse GRM ID
+file.}
 
-\item{chromosomes}{Chromosomes to analyze. NULL or "all" = all autosomes in reference.}
+\item{fdr}{Numeric in \code{(0, 1)}. Target FDR level. Default
+\code{0.1}.}
 
-\item{batch_size}{Number of genes to process in each batch for gene-centric analysis.}
+\item{chromosomes}{Integer vector of autosomes to analyse. Default
+\code{1:22}.}
 
-\item{read_mid_exist}{Logical. Whether to read existing mid results if available.}
+\item{batch_size}{Integer. Genes per batch in gene-centric mode. Default
+\code{20}.}
+
+\item{read_mid_exist}{Logical. Skip chromosomes with existing intermediate
+files. Default \code{TRUE}.}
+
+\item{pipeline_stage}{Character. Controls the run mode:
+\describe{
+\item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
+\item{\code{"stage1_knockoff"}}{Generate and save knockoffs only; no
+association testing. Writes a sample-list file for reproducibility.
+Implies \code{save_knockoff = TRUE}.}
+\item{\code{"stage2_analysis"}}{Load pre-generated knockoffs and run
+association testing only. Requires \code{knockoff_dir}.
+Sample overlap between the saved knockoffs and the current
+genotype/phenotype data is validated automatically, with warnings
+for any discrepancies.}
+}}
+
+\item{save_knockoff}{Logical or \code{NULL}. Whether to save generated
+knockoffs to \code{knockoff_dir}.
+\code{NULL} (default) sets this automatically: \code{TRUE} when
+\code{pipeline_stage = "stage1_knockoff"} or when multiple phenotypes
+are provided; \code{FALSE} otherwise.}
+
+\item{knockoff_dir}{Character or \code{NULL}. Directory for knockoff
+\code{.rds} files.  Defaults to \code{<outdir>/knockoffs}.  Must be
+provided (and populated) when \code{pipeline_stage =
+  "stage2_analysis"}.}
+}
+\value{
+Invisibly returns \code{TRUE} on success.
 }
 \description{
-Main entry function for knockoffPipeline.
+Main entry function for the KnockoffPipeline package. Supports both
+single-window and gene-centric association testing with knockoff-based
+FDR control.
+}
+\details{
+\strong{Knockoff file format.}
+Each knockoff file is an RDS list with fields:
+\code{G_k} (knockoff matrices), \code{sample_ids} (IIDs in row order),
+and \code{snp_pos} (SNP positions, for validation).
+
+\strong{Two-stage workflow.}
+Run stage 1 to pre-generate knockoffs, then run stage 2 with any
+phenotype.  Stage 2 reads the sample list produced by stage 1, computes
+the intersection with the current phenotype/genotype data, reindexes
+knockoff rows accordingly, and issues warnings for any lost samples.
+
+\strong{Multiple phenotypes.}
+Supply a character vector.  Samples with missing values in \emph{any}
+phenotype or covariate are removed once.  Per-phenotype output goes to
+\code{<outdir>/<phenotype_name>/}.
 }

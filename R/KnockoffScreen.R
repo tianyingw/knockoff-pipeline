@@ -18,7 +18,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
     start<-region.pos[start.index]
     end<-region.pos[start.index+1]-1
 
-    print(paste0(percent((start-pos.min)/(pos.max-pos.min)),' finished. Time used: ', round(proc.time()[3]-time.start,digits=1),'s. Scan ',start,'-',end))
+    # print(paste0(percent((start-pos.min)/(pos.max-pos.min)),' finished. Time used: ', round(proc.time()[3]-time.start,digits=1),'s. Scan ',start,'-',end))
     start.index<-start.index+1
 
     # print('processing genotype data')

@@ -2,160 +2,253 @@ utils::globalVariables(c('create.MK.AL_gene_buffer','G_gene_buffer_surround','LD
                          'surround.region','G_gene_buffer','G_EnhancerAll','p_EnhancerAll',
                          'pos_gene_buffer','G_Enhancer','n','G_enhancer_surround','pos_enhancer'))
 
-GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(G_gene_buffer_surround=G_gene_buffer_surround,
-                                                   variants_gene_buffer_surround=variants_gene_buffer_surround,
-                                                   gene_buffer.pos=gene_buffer.pos,R=R,
-                                                   G_EnhancerAll_surround=G_EnhancerAll_surround,
-                                                   variants_EnhancerAll_surround=variants_EnhancerAll_surround,
-                                                   p_EnhancerAll_surround=p_EnhancerAll_surround,
-                                                   Enhancer.pos=Enhancer.pos,p.EnhancerAll=p_EnhancerAll,
-                                                   window.size=window_length,result.null.model=obj_nullmodel,M=M,
-                                                   sparseSigma=sparseSigma,ratio=ratio,
-                                                   MAC.threshold=10,MAF.threshold=0.01,Gsub.id=NULL){
-   mu<-as.vector(result.null.model$fitted.values)
-   Y.res<-as.vector(result.null.model$residuals)
-   # print("null model prepared")
-   impute.method='fixed'
-   ## Prelimanry checking and filtering the variants
-   #match phenotype id and genotype id
-   if(length(Gsub.id)==0){match.index<-match(result.null.model$sampleID,1:nrow(G_gene_buffer_surround))}else{
-      match.index<-match(result.null.model$sampleID,Gsub.id)
-   }
+# GeneScan3D.UKB.GLMM.KnockoffGeneration ------------------------------------
+# Changes vs original:
+#  * save/load gene_buffer knockoff (via knockoff_file).
+#  * Enhancer knockoffs always generated fresh — NOT saved.
+#  * Knockoff validation: check both row count AND column count.
+#  * stage1_only=TRUE: save gene_buffer knockoff then return NULL.
+#  * NULL null model supported when stage1_only=TRUE.
+# ----------------------------------------------------------------------------
+GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
+  G_gene_buffer_surround,
+  variants_gene_buffer_surround,
+  gene_buffer.pos,
+  R                             = 0,
+  G_EnhancerAll_surround        = NULL,
+  variants_EnhancerAll_surround = NULL,
+  p_EnhancerAll_surround        = NULL,
+  Enhancer.pos                  = NULL,
+  p.EnhancerAll                 = NULL,
+  window.size                   = NULL,
+  result.null.model             = NULL,
+  M                             = 5,
+  sparseSigma                   = NULL,
+  ratio                         = NULL,
+  MAC.threshold                 = 10,
+  MAF.threshold                 = 0.01,
+  Gsub.id                       = NULL,
+  save_knockoff                 = FALSE,
+  load_knockoff                 = FALSE,
+  knockoff_file                 = NULL,
+  knockoff_sample_ids           = NULL,
+  stage1_only                   = FALSE
+) {
+  impute.method <- "fixed"
 
-   if(mean(is.na(match.index))>0){
-      msg<-sprintf("Some individuals are not matched with genotype. The rate is%f", mean(is.na(match.index)))
-      warning(msg,call.=F)
-   }
-   #individuals ids are matched with genotype
-   G_gene_buffer_surround=Matrix(G_gene_buffer_surround[match.index,])
-   #missing genotype imputation
-   G_gene_buffer_surround[G_gene_buffer_surround==-9 | G_gene_buffer_surround==9]=NA
-   N_MISS=sum(is.na(G_gene_buffer_surround))
-   MISS.freq=apply(is.na(G_gene_buffer_surround),2,mean)
-   if(N_MISS>0){
-      msg<-sprintf("The missing genotype rate is %f. Imputation is applied.", N_MISS/nrow(G_gene_buffer_surround)/ncol(G_gene_buffer_surround))
-      warning(msg,call.=F)
-      G_gene_buffer_surround=Impute(G_gene_buffer_surround,impute.method)
-   }
-   
-   #MAF filtering
-   MAF<-apply(G_gene_buffer_surround,2,mean)/2 #MAF of nonfiltered variants
-   G_gene_buffer_surround[,MAF>0.5 & !is.na(MAF)]<-2-G_gene_buffer_surround[,MAF>0.5 & !is.na(MAF)]
-   MAF<-apply(G_gene_buffer_surround,2,mean)/2
-   MAC<-apply(G_gene_buffer_surround,2,sum) #minor allele count
-   s<-apply(G_gene_buffer_surround,2,sd)
-   SNP.index<-which(MAF>0 & s!=0 & !is.na(MAF) & MISS.freq<0.1) 
-   
-   check.index<-which(MAF>0 & s!=0 & !is.na(MAF)  & MISS.freq<0.1)
-   if(length(check.index)<=1){
-      warning('Number of variants with missing rate <=10% in the gene is <=1')
-   }
-   
-   G_gene_buffer_surround<-Matrix(G_gene_buffer_surround[,SNP.index])
-   variants_gene_buffer_surround_filter=variants_gene_buffer_surround[SNP.index]
-   # print("geno prepared")
-   ###Generate multiple knockoffs
-   n=length(mu)
-   colnames(G_gene_buffer_surround)<-extract_position_universal(colnames(G_gene_buffer_surround))
-   G_gene_buffer_knockoff<-NULL
-   invisible(capture.output(G_gene_buffer_knockoff<-Knockoffgeneration.gene.buffer(G_gene_buffer_surround=G_gene_buffer_surround,
-                                                         gene_buffer_start=gene_buffer.pos[1],gene_buffer_end=gene_buffer.pos[2],M=M)))
-   # print("knockoff success")
-   ##obtain knockoff genotypes for gene buffer region
-   positions_gene_buffer=variants_gene_buffer_surround_filter[variants_gene_buffer_surround_filter<=gene_buffer.pos[2]&variants_gene_buffer_surround_filter>=gene_buffer.pos[1]]
-   G_gene_buffer=G_gene_buffer_surround[,variants_gene_buffer_surround_filter%in%positions_gene_buffer]
+  # ---- Sample matching (supports NULL null model for stage1) ---------------
+  if (is.null(result.null.model)) {
+    if (!isTRUE(stage1_only))
+      stop("result.null.model is NULL but stage1_only is not TRUE.")
+    # Stage 1: use all rows in Gsub.id / sequential order
+    n           <- nrow(G_gene_buffer_surround)
+    match.index <- seq_len(n)
+  } else {
+    mu    <- as.vector(result.null.model$fitted.values)
+    Y.res <- as.vector(result.null.model$residuals)
+    n     <- length(mu)
+    if (length(Gsub.id) == 0) {
+      match.index <- match(result.null.model$sampleID,
+                           seq_len(nrow(G_gene_buffer_surround)))
+    } else {
+      match.index <- match(result.null.model$sampleID, Gsub.id)
+    }
+    if (mean(is.na(match.index)) > 0)
+      warning(sprintf("Some individuals not matched with genotype. Rate = %f",
+                      mean(is.na(match.index))), call. = FALSE)
+  }
 
-   ## R enhancers ##
-   G_EnhancerAll=c()
-   p_EnhancerAll=c()
-   G_EnhancerAll_knockoff=c()
+  # IDs in matched row order (used as saved sample_ids in the knockoff file)
+  matched_ids <- if (!is.null(Gsub.id)) Gsub.id[match.index] else match.index
 
-   if (R!=0){
-      for (r in 1:R){
-         ##genotype Enhancer_surround_region
-         if (r==1){
-            G_Enhancer_surround=G_EnhancerAll_surround[,1:cumsum(p_EnhancerAll_surround)[r]]
-            positions_Enhancer_surround=variants_EnhancerAll_surround[1:cumsum(p_EnhancerAll_surround)[r]]
-         }else{
-            G_Enhancer_surround=G_EnhancerAll_surround[,(cumsum(p_EnhancerAll_surround)[r-1]+1):cumsum(p_EnhancerAll_surround)[r]]
-            positions_Enhancer_surround=variants_EnhancerAll_surround[(cumsum(p_EnhancerAll_surround)[r-1]+1):cumsum(p_EnhancerAll_surround)[r]]
-         }
-         
-         #individuals ids are matched with genotype
-         G_Enhancer_surround=Matrix(G_Enhancer_surround[match.index,])
-         #missing genotype imputation
-         G_Enhancer_surround[G_Enhancer_surround==-9 | G_Enhancer_surround==9]=NA
-         N_MISS=sum(is.na(G_Enhancer_surround))
-         MISS.freq=apply(is.na(G_Enhancer_surround),2,mean)
-         if(N_MISS>0){
-            msg<-sprintf("The missing genotype rate is %f. Imputation is applied.", N_MISS/nrow(G_Enhancer_surround)/ncol(G_Enhancer_surround))
-            warning(msg,call.=F)
-            G_Enhancer_surround=Impute(G_Enhancer_surround,impute.method)
-         }
-         
-         #MAF filtering
-         MAF<-apply(G_Enhancer_surround,2,mean)/2 #MAF of nonfiltered variants
-         G_Enhancer_surround[,MAF>0.5 & !is.na(MAF)]<-2-G_Enhancer_surround[,MAF>0.5 & !is.na(MAF)]
-         MAF<-apply(G_Enhancer_surround,2,mean)/2
-         MAC<-apply(G_Enhancer_surround,2,sum) #minor allele count
-         s<-apply(G_Enhancer_surround,2,sd)
-         SNP.index<-which(MAF>0 & s!=0 & !is.na(MAF) & MISS.freq<0.1) 
-         
-         check.index<-which(MAF>0 & s!=0 & !is.na(MAF)  & MISS.freq<0.1)
-         if(length(check.index)<=1){
-            warning('Number of variants with missing rate <=10% in the gene is <=1')
-         }
-         
-         G_Enhancer_surround<-Matrix(G_Enhancer_surround[,SNP.index])
-         positions_Enhancer_surround_filter=positions_Enhancer_surround[SNP.index]
-         colnames(G_Enhancer_surround)<-extract_position_universal(colnames(G_Enhancer_surround))
-         G_Enhancer_knockoff<-NULL
-         invisible(capture.output(G_Enhancer_knockoff<-Knockoffgeneration.enhancer(G_enhancer_surround=G_Enhancer_surround,
-                                                         enhancer_start=as.numeric(Enhancer.pos[r,1]),enhancer_end=as.numeric(Enhancer.pos[r,2]),M=M)))
-         
-         positions_enhancer=positions_Enhancer_surround_filter[positions_Enhancer_surround_filter<=Enhancer.pos[r,2]&positions_Enhancer_surround_filter>=Enhancer.pos[r,1]]
-         G_enhancer=Matrix(G_Enhancer_surround[,positions_Enhancer_surround_filter%in%positions_enhancer])
-         G_EnhancerAll=cbind(G_EnhancerAll,G_enhancer)
-         
-         # p_Enhancer=length(positions_enhancer)
-         p_Enhancer = dim(G_Enhancer_knockoff)[3]
-         p_EnhancerAll=c(p_EnhancerAll,p_Enhancer)
-         G_EnhancerAll_knockoff=abind::abind(G_EnhancerAll_knockoff,G_Enhancer_knockoff)
+  # ---- QC: gene buffer surround -------------------------------------------
+  G_gene_buffer_surround <- Matrix::Matrix(G_gene_buffer_surround[match.index, ])
+  G_gene_buffer_surround[G_gene_buffer_surround == -9 |
+                         G_gene_buffer_surround ==  9] <- NA
+  N_MISS    <- sum(is.na(G_gene_buffer_surround))
+  MISS.freq <- apply(is.na(G_gene_buffer_surround), 2, mean)
+  if (N_MISS > 0) {
+    warning(sprintf("Missing genotype rate = %f. Imputation applied.",
+                    N_MISS / nrow(G_gene_buffer_surround) / ncol(G_gene_buffer_surround)),
+            call. = FALSE)
+    G_gene_buffer_surround <- Impute(G_gene_buffer_surround, impute.method)
+  }
+  MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
+  G_gene_buffer_surround[, MAF > 0.5 & !is.na(MAF)] <-
+    2 - G_gene_buffer_surround[, MAF > 0.5 & !is.na(MAF)]
+  MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
+  s         <- apply(G_gene_buffer_surround, 2, sd)
+  SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
+  if (length(SNP.index) <= 1) {
+    warning("Number of variants passing QC in gene buffer surround is <=1", call. = FALSE)
+    return(NULL)
+  }
+  G_gene_buffer_surround               <- Matrix::Matrix(G_gene_buffer_surround[, SNP.index])
+  variants_gene_buffer_surround_filter <- variants_gene_buffer_surround[SNP.index]
+  colnames(G_gene_buffer_surround)     <-
+    extract_position_universal(colnames(G_gene_buffer_surround))
+
+  # Positions within the gene buffer (subset of surround)
+  positions_gene_buffer <- variants_gene_buffer_surround_filter[
+    variants_gene_buffer_surround_filter <= gene_buffer.pos[2] &
+    variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
+  ]
+  if (length(positions_gene_buffer) == 0) return(NULL)
+
+  # ---- Gene buffer knockoff: save / load / generate -----------------------
+  # Input to generation: G_gene_buffer_surround (POST-QC surround — wider region)
+  # Output: array [M × n_matched × p_in_gene_buffer]
+  G_gene_buffer_knockoff <- .gene_ko_load_or_gen(
+    load_knockoff     = load_knockoff,
+    save_knockoff     = save_knockoff,
+    knockoff_file     = knockoff_file,
+    matched_ids       = matched_ids,
+    p_expected        = length(positions_gene_buffer),
+    gen_fun           = function() {
+      ko <- NULL
+      invisible(capture.output(
+        ko <- Knockoffgeneration.gene.buffer(
+          G_gene_buffer_surround = G_gene_buffer_surround,  # surround matrix
+          gene_buffer_start      = gene_buffer.pos[1],
+          gene_buffer_end        = gene_buffer.pos[2],
+          M                      = M
+        )
+      ))
+      ko
+    },
+    snp_pos           = positions_gene_buffer
+  )
+  if (is.null(G_gene_buffer_knockoff)) return(NULL)
+
+  # Genotype matrix for gene buffer region (for association test)
+  G_gene_buffer <- G_gene_buffer_surround[,
+    variants_gene_buffer_surround_filter %in% positions_gene_buffer
+  ]
+
+  # ---- Stage 1: done after saving knockoff --------------------------------
+  if (isTRUE(stage1_only)) return(invisible(NULL))
+
+  # ---- R enhancers (always generate fresh — not saved) --------------------
+  G_EnhancerAll          <- c()
+  p_EnhancerAll_out      <- c()
+  G_EnhancerAll_knockoff <- c()
+
+  if (R != 0) {
+    for (r in seq_len(R)) {
+      # Slice enhancer surround columns from the batch matrix
+      if (r == 1) {
+        G_Enh_surround        <- G_EnhancerAll_surround[,
+          seq_len(cumsum(p_EnhancerAll_surround)[r]), drop = FALSE]
+        pos_Enh_surround      <- variants_EnhancerAll_surround[
+          seq_len(cumsum(p_EnhancerAll_surround)[r])]
+      } else {
+        G_Enh_surround        <- G_EnhancerAll_surround[,
+          (cumsum(p_EnhancerAll_surround)[r - 1] + 1):
+           cumsum(p_EnhancerAll_surround)[r], drop = FALSE]
+        pos_Enh_surround      <- variants_EnhancerAll_surround[
+          (cumsum(p_EnhancerAll_surround)[r - 1] + 1):
+           cumsum(p_EnhancerAll_surround)[r]]
       }
-   }
-   print("enhancer prepared")
-    ####GeneScan3D.UKB.GLMM: conduct gene-based test on the gene buffer region, adding R enhancers ################
-   ##original p-values
-   tmp<-NULL
-   # invisible(capture.output(tmp<-GeneScan3D.UKB.GLMM(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=R,
-   #                                     p_Enhancer=p_EnhancerAll,window.size=window.size,pos=positions_gene_buffer,
-   #                                     MAC.threshold=MAC.threshold,MAF.threshold=MAF.threshold,Gsub.id=row.names(G_gene_buffer),
-   #                                     result.null.model.GLMM=result.null.model,outcome=result.null.model$traitType,
-   #                                     sparseSigma=sparseSigma,ratio=ratio)$GeneScan3D.Cauchy.pvalue))
-   X<-result.null.model$X #covariates include intercept
-   tmp<-GeneScan3D.UKB.GLMM(G=G_gene_buffer,Z=NULL,G.promoter=NULL,Z.promoter=NULL,
-                              G.EnhancerAll=G_EnhancerAll,Z.EnhancerAll=NULL,R=R,
-                              p_Enhancer=p_EnhancerAll,window.size=window.size,pos=positions_gene_buffer,
-                              MAC.threshold=MAC.threshold,MAF.threshold=MAF.threshold,Gsub.id=Gsub.id[match.index],
-                              result.null.model.GLMM=result.null.model,outcome=result.null.model$traitType,
-                              sparseSigma=sparseSigma,ratio=ratio)$GeneScan3D.Cauchy.pvalue
-   GeneScan3D.Cauchy = tmp
-   print("GeneScan3D success")
-   #M knockoff p-values 
-   GeneScan3D.Cauchy_knockoff=matrix(NA,nrow=M,ncol=3)
-   for (k in 1:M){
-      G_gene_buffer_knockoff_k=G_gene_buffer_knockoff[k,,]
-      tmp<-NULL
-      invisible(capture.output(tmp<-GeneScan3D.UKB.GLMM(G=G_gene_buffer_knockoff_k,G.EnhancerAll=G_EnhancerAll_knockoff[k,,], R=R,
-                                                                  p_Enhancer=p_EnhancerAll,window.size=window.size,pos=positions_gene_buffer,
-                                                                  MAC.threshold=MAC.threshold,MAF.threshold=MAF.threshold,Gsub.id=Gsub.id[match.index],
-                                                                  result.null.model.GLMM=result.null.model,outcome=result.null.model$traitType,
-                                                                  sparseSigma=sparseSigma,ratio=ratio)$GeneScan3D.Cauchy.pvalue))
-      GeneScan3D.Cauchy_knockoff[k,] = tmp
-   }
-   print("GeneScan3D knockoff success")
-   return(list(GeneScan3D.Cauchy=GeneScan3D.Cauchy,GeneScan3D.Cauchy_knockoff=GeneScan3D.Cauchy_knockoff))
+
+      # QC: enhancer surround
+      G_Enh_surround <- Matrix::Matrix(G_Enh_surround[match.index, ])
+      G_Enh_surround[G_Enh_surround == -9 | G_Enh_surround == 9] <- NA
+      N_MISS    <- sum(is.na(G_Enh_surround))
+      MISS.freq <- apply(is.na(G_Enh_surround), 2, mean)
+      if (N_MISS > 0) {
+        warning(sprintf("Enhancer %d: missing rate = %f. Imputation applied.", r,
+                        N_MISS / nrow(G_Enh_surround) / ncol(G_Enh_surround)),
+                call. = FALSE)
+        G_Enh_surround <- Impute(G_Enh_surround, impute.method)
+      }
+      MAF       <- apply(G_Enh_surround, 2, mean) / 2
+      G_Enh_surround[, MAF > 0.5 & !is.na(MAF)] <-
+        2 - G_Enh_surround[, MAF > 0.5 & !is.na(MAF)]
+      MAF       <- apply(G_Enh_surround, 2, mean) / 2
+      s         <- apply(G_Enh_surround, 2, sd)
+      SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
+      if (length(SNP.index) <= 1) {
+        warning(sprintf("Enhancer %d: variants passing QC <=1; skipping.", r), call. = FALSE)
+        next
+      }
+      G_Enh_surround   <- Matrix::Matrix(G_Enh_surround[, SNP.index])
+      pos_Enh_filter   <- pos_Enh_surround[SNP.index]
+      colnames(G_Enh_surround) <- extract_position_universal(colnames(G_Enh_surround))
+
+      # Generate enhancer knockoff fresh (NOT saved)
+      # BUG FIX: was M=5 (hardcoded)
+      G_Enh_knockoff <- NULL
+      invisible(capture.output(
+        G_Enh_knockoff <- Knockoffgeneration.enhancer(
+          G_enhancer_surround = G_Enh_surround,      # surround matrix
+          enhancer_start      = as.numeric(Enhancer.pos[r, 1]),
+          enhancer_end        = as.numeric(Enhancer.pos[r, 2]),
+          M                   = M                    # FIX: was 5
+        )
+      ))
+
+      positions_enhancer <- pos_Enh_filter[
+        pos_Enh_filter <= Enhancer.pos[r, 2] &
+        pos_Enh_filter >= Enhancer.pos[r, 1]
+      ]
+      G_enhancer             <- Matrix::Matrix(
+        G_Enh_surround[, pos_Enh_filter %in% positions_enhancer])
+      G_EnhancerAll          <- cbind(G_EnhancerAll, G_enhancer)
+      p_EnhancerAll_out      <- c(p_EnhancerAll_out, dim(G_Enh_knockoff)[3])
+      G_EnhancerAll_knockoff <- abind::abind(G_EnhancerAll_knockoff, G_Enh_knockoff)
+    }
+  }
+
+  # ---- Association tests ---------------------------------------------------
+  tmp <- GeneScan3D.UKB.GLMM(
+    G                    = G_gene_buffer,
+    Z                    = NULL, G.promoter = NULL, Z.promoter = NULL,
+    G.EnhancerAll        = G_EnhancerAll,
+    Z.EnhancerAll        = NULL,
+    R                    = R,
+    p_Enhancer           = p_EnhancerAll_out,
+    window.size          = window.size,
+    pos                  = positions_gene_buffer,
+    MAC.threshold        = MAC.threshold,
+    MAF.threshold        = MAF.threshold,
+    Gsub.id              = Gsub.id[match.index],
+    result.null.model.GLMM = result.null.model,
+    outcome              = result.null.model$traitType,
+    sparseSigma          = sparseSigma,
+    ratio                = ratio
+  )$GeneScan3D.Cauchy.pvalue
+  GeneScan3D.Cauchy <- tmp
+
+  GeneScan3D.Cauchy_knockoff <- matrix(NA, nrow = M, ncol = 3)
+  for (k in seq_len(M)) {
+    G_gbk <- G_gene_buffer_knockoff[k, , ]
+    invisible(capture.output(
+      tmp <- GeneScan3D.UKB.GLMM(
+        G                    = G_gbk,
+        G.EnhancerAll        = if (R > 0 && length(G_EnhancerAll_knockoff) > 0)
+                                 G_EnhancerAll_knockoff[k, , ] else NULL,
+        R                    = R,
+        p_Enhancer           = p_EnhancerAll_out,
+        window.size          = window.size,
+        pos                  = positions_gene_buffer,
+        MAC.threshold        = MAC.threshold,
+        MAF.threshold        = MAF.threshold,
+        Gsub.id              = Gsub.id[match.index],
+        result.null.model.GLMM = result.null.model,
+        outcome              = result.null.model$traitType,
+        sparseSigma          = sparseSigma,
+        ratio                = ratio
+      )$GeneScan3D.Cauchy.pvalue
+    ))
+    GeneScan3D.Cauchy_knockoff[k, ] <- tmp
+  }
+
+  return(list(
+    GeneScan3D.Cauchy          = GeneScan3D.Cauchy,
+    GeneScan3D.Cauchy_knockoff = GeneScan3D.Cauchy_knockoff
+  ))
 }
+
 
 Knockoffgeneration.gene.buffer=function(G_gene_buffer_surround=G_gene_buffer_surround,
                                         gene_buffer_start=gene_buffer_start,
