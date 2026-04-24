@@ -356,7 +356,6 @@ run_pipeline <- function(
         warning("All blocks failed for chromosome ", c, "; skipping.")
         next
       }
-      print(str(out))
 
       single_chr <- data.table::rbindlist(
         lapply(out, function(x) data.table::as.data.table(x$result.single)),
@@ -397,7 +396,7 @@ run_pipeline <- function(
            "Check intermediate files in: ", mid_dir)
     }
 
-    summary <- KS_summary(
+    summary_res <- KS_summary(
       as.matrix(result.window.all),
       as.matrix(result.single.all),
       M,
@@ -405,7 +404,7 @@ run_pipeline <- function(
     )
 
     keep_cols  <- c("chr", "start", "end", "Qvalue", "W_KS", "W_Threshold", "detect")
-    result_all <- summary_res[, keep_cols, with = FALSE]
+    result_all <- summary_res[, keep_cols]
 
     out_file <- file.path(outdir, "Single_Window_results.csv")
     data.table::fwrite(result_all, out_file)
@@ -452,6 +451,7 @@ run_pipeline <- function(
       }
 
       chr_genes <- genes_info[chr==c]
+      chr_genes <- chr_genes[order(chr_genes$start), ]
       n_gene <- nrow(chr_genes)
 
       # ---- Load enhancer annotation for this chromosome --------------------
@@ -482,13 +482,10 @@ run_pipeline <- function(
 
       for (b in seq_along(batch_index)) {
 
-        message("  Batch ", b, " / ", length(batch_index),
-                " (genes ", batch_index[[b]][1L], "-",
-                batch_index[[b]][length(batch_index[[b]])], ")")
-
         result_list_chr[[b]] <- run_batch_gene(
           genes = chr_genes,
-          kk_vec = batch_index[[b]],
+          b = b,
+          batch_index = batch_index,
           geno.file = geno_file,
           obj_nullmodel = if(!sample_uncorrelated) nullobj$result.null.model.GLMM else nullobj,
           window_length = sliding_window_length,
@@ -496,14 +493,17 @@ run_pipeline <- function(
           M = M,
           genome_build = genome_build,
           Gsub.id = Gsub.id,
+          abc_df = abc_df,
+          gh_df = gh_df,
           sparseSigma = if(!sample_uncorrelated) nullobj$sparseSigma else NULL,
           ratio = if(!sample_uncorrelated) nullobj$ratio else NULL,
           user_cores = user_cores
         )
         gc()
       }
-
-      result_chr <- data.table::rbindlist(data.table::as.data.table(result_list_chr), fill=TRUE)
+      result_list_chr <- Filter(Negate(is.null), result_list_chr)
+      print(str(result_list_chr))
+      result_chr <- data.table::rbindlist(result_list_chr, fill=TRUE)
       data.table::fwrite(result_chr, mid_file_chr, sep="\t")
 
       rm(result_list_chr, result_chr); gc()
@@ -527,12 +527,12 @@ run_pipeline <- function(
       stop("No gene-centric results were produced. ",
            "Check intermediate files in: ", mid_dir)
     }
-
+    # print(str(result.all))
     summary_res <- GeneScan3DKnock_Summary(result.all, M = M, fdr = fdr)
 
     keep_cols  <- c("chr", "gene_id", "gene_start", "gene_end",
                     "Qvalue", "W", "W_Threshold", "detect")
-    result_all <- summary_res[, keep_cols, with = FALSE]
+    result_all <- summary_res[, keep_cols]
 
     data.table::setnames(
       result_all,
