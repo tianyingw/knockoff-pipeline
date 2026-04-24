@@ -1070,7 +1070,7 @@ GeneScan3D.KnockoffGeneration=function(G_gene_buffer_surround=G_gene_buffer_surr
          positions_Enhancer_surround_filter=positions_Enhancer_surround[SNP.index]
          
          G_Enhancer_knockoff<-create.MK.AL_Enhancer(X=G_Enhancer_surround,pos=positions_Enhancer_surround_filter,
-                                                    Enhancer_start=as.numeric(Enhancer.pos[r,1]),Enhancer_end=as.numeric(Enhancer.pos[r,2]),M=5,
+                                                    Enhancer_start=as.numeric(Enhancer.pos[r,1]),Enhancer_end=as.numeric(Enhancer.pos[r,2]),M=M,
                                                     corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10000,corr_base=0.05,n.AL=floor(10*n^(1/3)*log(n)),
                                                     thres.ultrarare=25,R2.thres=0.75)
          

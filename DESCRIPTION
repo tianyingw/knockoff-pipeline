@@ -8,10 +8,10 @@ Authors: Yujie Shen, Shiyang Ma, Tianying Wang
              role = c("aut")),
       person("Shiyang", "Ma", 
              email = "mashiyang1991@sjtu.edu.cn"
-             role = "aut", "cre"),
+             role = "cre"),
       person("Tianying", "Wang",
              email = "Tianying.Wang@colostate.edu"
-             role = "aut", "cre")
+             role = "cre")
     )
 Description: 
     Provides an end-to-end pipeline for large-scale genomic knockoff analysis.
