@@ -1,3 +1,10 @@
 .Rhistory
 .RData
 .Rproj.user
+
+SAIGE/src/*.o
+SAIGE/src/*.so
+SAIGE/src/*.dll
+SAIGE/src/*.dylib
+SAIGE/src/backup/*
+SAIGE/pixi.lock
