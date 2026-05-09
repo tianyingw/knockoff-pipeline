@@ -1,0 +1,76 @@
+Bootstrap: docker
+From: mambaorg/micromamba:2.0.5
+
+%labels
+    Author Tianying-Wang-Lab
+    Description KnockoffPipeline with SAIGE for Linux x86_64
+
+%files
+    . /opt/knockoff-pipeline
+
+%post
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        git \
+        libcurl4-openssl-dev \
+        libglpk-dev \
+        libssl-dev \
+        libxml2-dev \
+        make \
+        pkg-config \
+        zlib1g-dev && \
+        rm -rf /var/lib/apt/lists/*
+
+    mkdir -p /work /results
+
+    micromamba create -y -n pipeline -f /opt/knockoff-pipeline/inst/conda_env/environment.yml
+    micromamba clean --all --yes
+
+    mkdir -p /opt/knockoff-pipeline/SAIGE/.pixi/envs/default
+    ln -sfn /opt/conda/envs/pipeline/include /opt/knockoff-pipeline/SAIGE/.pixi/envs/default/include
+    ln -sfn /opt/conda/envs/pipeline/lib /opt/knockoff-pipeline/SAIGE/.pixi/envs/default/lib
+
+    if [ ! -f /opt/knockoff-pipeline/SAIGE/plink2_includes.a ]; then
+        echo "Missing /opt/knockoff-pipeline/SAIGE/plink2_includes.a" >&2
+        exit 1
+    fi
+
+    /opt/conda/bin/micromamba run -n pipeline Rscript -e "install.packages(c('BiocManager','remotes','R.utils','RhpcBLASctl','qlcMatrix','roxygen2','rversions','tictoc','lintools'), repos='https://cloud.r-project.org')"
+    /opt/conda/bin/micromamba run -n pipeline Rscript -e "BiocManager::install('WGScan', ask = FALSE, update = FALSE)"
+    /opt/conda/bin/micromamba run -n pipeline Rscript -e "remotes::install_github('leeshawn/MetaSKAT', upgrade = 'never', dependencies = FALSE)"
+
+    export CPPFLAGS="-I/opt/conda/envs/pipeline/include"
+    export LDFLAGS="-L/opt/conda/envs/pipeline/lib"
+    export PKG_CONFIG_PATH="/opt/conda/envs/pipeline/lib/pkgconfig"
+    export CONDA_PREFIX="/opt/conda/envs/pipeline"
+
+    cd /opt/knockoff-pipeline
+    /opt/conda/bin/micromamba run -n pipeline R CMD INSTALL SAIGE
+    /opt/conda/bin/micromamba run -n pipeline R CMD INSTALL .
+
+%environment
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export CONDA_DEFAULT_ENV=pipeline
+    export CONDA_PREFIX=/opt/conda/envs/pipeline
+    export PATH=/opt/conda/envs/pipeline/bin:/opt/conda/bin:$PATH
+    export APPTAINERENV_KNOCKOFF_OUTDIR=${APPTAINERENV_KNOCKOFF_OUTDIR:-}
+    export APPTAINERENV_PLINK_BIN=${APPTAINERENV_PLINK_BIN:-}
+    export APPTAINERENV_KNOCKOFF_CORES=${APPTAINERENV_KNOCKOFF_CORES:-}
+
+%runscript
+    cd /opt/knockoff-pipeline
+    exec /opt/conda/bin/micromamba run --no-capture-output -n pipeline "$@"
+
+%startscript
+    cd /opt/knockoff-pipeline
+    exec /opt/conda/bin/micromamba run --no-capture-output -n pipeline bash
+
+%test
+    cd /opt/knockoff-pipeline
+    /opt/conda/bin/micromamba run -n pipeline Rscript -e "library(KnockoffPipeline); library(SAIGE); sessionInfo()"

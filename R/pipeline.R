@@ -375,6 +375,7 @@ run_pipeline <- function(
         sample_id_col      = pheno_id,
         covar_cols         = covar_cols,
         cat_covar_cols     = cat_covar_cols,
+        output_prefix      = file.path(outdir, "saige_output"),
         sparse_grm_file    = grm_file,
         sparse_grm_id_file = grm_id_file
       )

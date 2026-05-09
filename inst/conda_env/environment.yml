@@ -1,4 +1,4 @@
-name: RSAIGE
+name: pipeline
 channels:
   - conda-forge
   - bioconda
@@ -8,13 +8,13 @@ dependencies:
   - python=3.12
   - r-base=4.3.1
 
-  # 编译工具
+  # Build tools
   - cmake
   - make
   - gcc
   - gxx
 
-  # SAIGE / C++ 依赖
+  # SAIGE / C++ dependencies
   - savvy
   - boost
   - openblas
@@ -25,7 +25,7 @@ dependencies:
   - superlu
   - libdeflate
 
-  # R 依赖（关键）
+  # R dependencies
   - r-matrix
   - r-rcpp
   - r-rcpparmadillo
@@ -38,6 +38,9 @@ dependencies:
   - r-skat
   - r-spatest
   - r-rcppparallel
+
+   # PLINK 2.0
+  - plink2
 
   - pip
   - pip:

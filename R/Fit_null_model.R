@@ -41,7 +41,15 @@ Fit_null_model_GLMM <- function(plink_file,
                                 output_prefix = "saige_output",
                                 n_threads = 4,
                                 sparse_grm_file = NULL,
-                                sparse_grm_id_file = NULL) {
+                                sparse_grm_id_file = NULL,
+                                thin_target_markers = 5000L,
+                                num_random_marker_for_sparse_kin = 1000L,
+                                min_maf_for_grm = 0.01,
+                                max_missing_rate_for_grm = 0.15,
+                                relatedness_cutoff = 0.125) {
+  # if ("package:SAIGE" %in% search()) {
+  #   try(closeGenoFile_plink(), silent = TRUE)
+  # }
   
   # 验证必需参数
   if (missing(plink_file) || missing(pheno_file) || missing(pheno_col)) {
@@ -56,11 +64,22 @@ Fit_null_model_GLMM <- function(plink_file,
   if (!outcome_type %in% c("D", "C")) {
     stop("outcome must be 'D' or 'C'")
   }
+  if (!is.numeric(thin_target_markers) || length(thin_target_markers) != 1L || thin_target_markers < 1) {
+    stop("'thin_target_markers' must be a positive integer")
+  }
+  if (!is.numeric(num_random_marker_for_sparse_kin) || length(num_random_marker_for_sparse_kin) != 1L || num_random_marker_for_sparse_kin < 1) {
+    stop("'num_random_marker_for_sparse_kin' must be a positive integer")
+  }
   trait_type <- ifelse(outcome_type == "D", 'binary', 'quantitative')
+  output_prefix <- normalizePath(output_prefix, winslash = "/", mustWork = FALSE)
+  grm_prefix <- file.path(output_prefix, "GRM")
+  thin_path <- file.path(output_prefix, "thinned")
+  total_markers <- nrow(data.table::fread(paste0(plink_file, ".bim"), header = FALSE, select = 1L, showProgress = FALSE))
+  analysis_prefix <- plink_file
 
   # 准备SAIGE参数列表
   saige_args <- list(
-    plinkFile = plink_file,
+    plinkFile = analysis_prefix,
     phenoFile = pheno_file,
     phenoCol = pheno_col,
     traitType = trait_type,
@@ -80,27 +99,69 @@ Fit_null_model_GLMM <- function(plink_file,
     saige_args$qCovarCol <- as.character(cat_covar_cols)
   }
   # 创建输出目录
-  if (!dir.exists(output_prefix)) {
-    dir.create(output_prefix, recursive = TRUE)
+  if (dir.exists(output_prefix)) {
+    unlink(output_prefix, recursive = TRUE, force = TRUE)
+  }
+  dir.create(output_prefix, recursive = TRUE, showWarnings = FALSE)
+
+  if (total_markers > as.integer(thin_target_markers)) {
+    thin_fraction <- as.integer(thin_target_markers) / total_markers
+    message(sprintf(
+      "Thinning PLINK markers from %d to about %d (fraction %.6f).",
+      total_markers, as.integer(thin_target_markers), thin_fraction
+    ))
+    system(sprintf(
+      "%s --bfile %s --thin %s --make-bed --out %s --silent",
+      shQuote(plink_prefix),
+      shQuote(plink_file),
+      format(thin_fraction, scientific = FALSE, trim = TRUE),
+      shQuote(thin_path)
+    ))
+    analysis_prefix <- thin_path
+  } else {
+    message(sprintf(
+      "PLINK file has %d markers only; skipping thinning and using the original dataset.",
+      total_markers
+    ))
   }
   # 添加稀疏GRM参数
   if (!is.null(sparse_grm_file)) {
       saige_args$sparseGRMFile <- sparse_grm_file
       saige_args$sparseGRMSampleIDFile <- sparse_grm_id_file
   }else{
-    thin.path <- file.path(output_prefix,"thinned")
-    system(sprintf("%s --bfile %s --thin 0.001 --make-bed --out %s --silent",
-                  plink_prefix, plink_file, thin.path))
-    createSparseGRM(bedFile = paste0(thin.path, ".bed"),
-                bimFile = paste0(thin.path, ".bim"),
-                famFile = paste0(thin.path, ".fam"),
-                outputPrefix= file.path(output_prefix,"GRM"),
-                nThreads = n_threads)
-    saige_args$sparseGRMFile <- file.path(output_prefix,"GRM_relatednessCutoff_0.125_1000_randomMarkersUsed.sparseGRM.mtx")
-    saige_args$sparseGRMSampleIDFile <- file.path(output_prefix,"GRM_relatednessCutoff_0.125_1000_randomMarkersUsed.sparseGRM.mtx.sampleIDs.txt")
+    create_sparse_grm_once <- function(prefix) {
+      createSparseGRM(
+        bedFile = paste0(prefix, ".bed"),
+        bimFile = paste0(prefix, ".bim"),
+        famFile = paste0(prefix, ".fam"),
+        outputPrefix = grm_prefix,
+        numRandomMarkerforSparseKin = as.integer(num_random_marker_for_sparse_kin),
+        relatednessCutoff = relatedness_cutoff,
+        nThreads = n_threads,
+        minMAFforGRM = min_maf_for_grm,
+        maxMissingRateforGRM = max_missing_rate_for_grm
+      )
+    }
+
+    tryCatch(
+      create_sparse_grm_once(analysis_prefix),
+      error = function(e) {
+        if (analysis_prefix == plink_file) {
+          stop(e)
+        }
+        warning(
+          "Sparse GRM creation failed on the thinned dataset; retrying with the original PLINK dataset. Original error: ",
+          conditionMessage(e)
+        )
+        analysis_prefix <<- plink_file
+        create_sparse_grm_once(analysis_prefix)
+      }
+    )
+    saige_args$sparseGRMFile <- paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx")
+    saige_args$sparseGRMSampleIDFile <- paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx.sampleIDs.txt")
   }
   # 执行SAIGE null model拟合
-  saige_args$plinkFile <- file.path(output_prefix,"thinned")
+  saige_args$plinkFile <- analysis_prefix
   rda_file <- paste0(output_prefix, ".rda")
   do.call(fitNULLGLMM, saige_args)
   load(rda_file)
@@ -115,7 +176,7 @@ Fit_null_model_GLMM <- function(plink_file,
   modglmm$traitType <- ifelse(modglmm$traitType == "binary", 'D', 'C')
   results <- list(
       result.null.model.GLMM = modglmm,
-      sparseSigma = readMM(file.path(output_prefix,"GRM_relatednessCutoff_0.125_1000_randomMarkersUsed.sparseGRM.mtx")),
+      sparseSigma = readMM(paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx")),
       ratio = as.numeric(ratio))
   return(results)
 }

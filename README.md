@@ -27,33 +27,169 @@ The pipeline supports:
 
 ## Installation
 
-### 1. System dependencies
+### conda
 
-- PLINK2 (must be on `PATH`)
-
-### 2. Install SAIGE (conda environment)
+#### 1. create a conda environment
 
 ```bash
-conda env create -f environment-RSAIGE.yml
-conda activate RSAIGE
+conda env create -f inst/conda_env/environment.yml
+conda activate pipeline
 FLAGPATH=`which python | sed 's|/bin/python$||'`
 export LDFLAGS="-L${FLAGPATH}/lib"
 export CPPFLAGS="-I${FLAGPATH}/include"
 ```
 
-### 3. Install R dependencies
+#### 2. Check and install R dependencies
 
 ```bash
-Rscript install_packages.R
+Rscript inst/conda_env/install_packages.R
 ```
 
-### 4. Install KnockoffPipeline
+#### 3. Install SAIGE
+
+```bash
+R CMD INSTALL SAIGE
+```
+
+#### 4. Install KnockoffPipeline
 
 ```R
 devtools::install_github("tianyingw/knockoff-pipeline")
 ```
 
 ---
+
+### docker
+
+This image targets Linux containers.
+
+Build the image from the package directory:
+
+```bash
+cd knockoff-pipeline
+docker build -f inst/docker/Dockerfile -t knockoff-pipeline:latest .
+```
+
+If you want to force regeneration of `SAIGE/plink2_includes.a` inside the
+container instead of reusing the checked-in archive:
+
+```bash
+docker build -f inst/docker/Dockerfile \
+  --build-arg REBUILD_PLINK2_INCLUDES=1 \
+  -t knockoff-pipeline:latest .
+```
+
+Open a shell in the container:
+
+```bash
+docker run --rm -it knockoff-pipeline:latest
+```
+
+Inside the container, the working directory is already the package root, so the
+example scripts can be run directly:
+
+```bash
+Rscript inst/examples/SNP_Window.R
+Rscript inst/examples/Gene_unrelated.R
+Rscript inst/examples/Gene_related.R
+```
+
+You can also run them directly from the host:
+
+```bash
+docker run --rm knockoff-pipeline:latest Rscript inst/examples/SNP_Window.R
+docker run --rm knockoff-pipeline:latest Rscript inst/examples/Gene_unrelated.R
+docker run --rm knockoff-pipeline:latest Rscript inst/examples/Gene_related.R
+```
+
+If you want the example output on the host:
+
+```bash
+mkdir -p results
+docker run --rm \
+  -e KNOCKOFF_OUTDIR=/results \
+  -v "$PWD/results:/results" \
+  knockoff-pipeline:latest \
+  Rscript inst/examples/SNP_Window.R
+```
+
+Run the pipeline on your own data:
+
+```bash
+docker run --rm \
+  -v /absolute/path/to/data:/data \
+  -v /absolute/path/to/results:/results \
+  knockoff-pipeline:latest \
+  Rscript -e "library(KnockoffPipeline); run_pipeline(outdir='/results', test_type='Single_Window', pheno_file='/data/phenotype.csv', geno_file='/data/demo', phenotype='Y', pheno_id='IID', covar_cols='X1', plink_path='plink2', genome_build='hg19', sample_uncorrelated=TRUE)"
+```
+
+Notes:
+
+- The image installs the local `SAIGE` source tree first, then installs `KnockoffPipeline`.
+- `plink2` is available inside the container from the conda environment, so use `plink_path = "plink2"` unless you intentionally mount another binary.
+- The bundled example scripts accept `KNOCKOFF_OUTDIR`, `PLINK_BIN`, and `KNOCKOFF_CORES` environment variables.
+- The current Dockerfile reuses the checked-in `SAIGE/plink2_includes.a` by default. Set `REBUILD_PLINK2_INCLUDES=1` if you need to rebuild it in-container.
+- Build from the `knockoff-pipeline/` subdirectory, not the repository root, to avoid sending large unrelated files into the Docker build context.
+
+### apptainer / singularity
+
+This is the recommended container route on many HPC servers where Docker is not available.
+
+Build the image from the package directory:
+
+```bash
+cd knockoff-pipeline
+apptainer build knockoff-pipeline.sif inst/apptainer/knockoff-pipeline.def
+```
+
+If your cluster still uses the older command name, `singularity` is equivalent:
+
+```bash
+singularity build knockoff-pipeline.sif inst/apptainer/knockoff-pipeline.def
+```
+
+Open a shell:
+
+```bash
+apptainer shell knockoff-pipeline.sif
+```
+
+Run the packaged examples directly:
+
+```bash
+apptainer exec knockoff-pipeline.sif Rscript inst/examples/SNP_Window.R
+apptainer exec knockoff-pipeline.sif Rscript inst/examples/Gene_unrelated.R
+apptainer exec knockoff-pipeline.sif Rscript inst/examples/Gene_related.R
+```
+
+Write example output to a host directory:
+
+```bash
+mkdir -p results
+apptainer exec \
+  --bind "$PWD/results:/results" \
+  --env KNOCKOFF_OUTDIR=/results \
+  knockoff-pipeline.sif \
+  Rscript inst/examples/SNP_Window.R
+```
+
+Run on your own data:
+
+```bash
+apptainer exec \
+  --bind /absolute/path/to/data:/data \
+  --bind /absolute/path/to/results:/results \
+  knockoff-pipeline.sif \
+  Rscript -e "library(KnockoffPipeline); run_pipeline(outdir='/results', test_type='Single_Window', pheno_file='/data/phenotype.csv', geno_file='/data/demo', phenotype='Y', pheno_id='IID', covar_cols='X1', plink_path='plink2', genome_build='hg19', sample_uncorrelated=TRUE)"
+```
+
+Notes:
+
+- The definition file is [inst/apptainer/knockoff-pipeline.def](/abs/path/e:/college_material/statistics/tianying/knockoff-pipeline/knockoff-pipeline/inst/apptainer/knockoff-pipeline.def).
+- It reuses the checked-in `SAIGE/plink2_includes.a`, so the current setup targets Linux `x86_64`.
+- `apptainer build` often requires root, `sudo`, or a site-supported remote build workflow. On many HPC systems, users can `exec` and `shell` existing `.sif` files but cannot build them locally.
+- If your cluster forbids local builds, build `knockoff-pipeline.sif` on another Linux machine first, then upload the `.sif` file to the server.
+
 
 ## Quick Start
 
