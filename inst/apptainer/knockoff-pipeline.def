@@ -2,7 +2,6 @@ Bootstrap: docker
 From: mambaorg/micromamba:2.0.5
 
 %labels
-    Author Tianying-Wang-Lab
     Description KnockoffPipeline with SAIGE for Linux x86_64
 
 %files
