@@ -7,9 +7,9 @@
 run_pipeline(
   outdir,
   test_type,
-  pheno_file,
   geno_file,
-  phenotype,
+  pheno_file = NULL,
+  phenotype = NULL,
   pheno_id = NULL,
   covar_cols = NULL,
   cat_covar_cols = NULL,
@@ -37,17 +37,18 @@ run_pipeline(
 \item{test_type}{Character. One of \code{"Single_Window"} or
 \code{"Gene_Centric"}.}
 
-\item{pheno_file}{Character. Path to the phenotype file (tab- or
-comma-separated).}
-
 \item{geno_file}{Character. PLINK genotype file prefix (no extension).}
 
-\item{phenotype}{Character \strong{vector} of phenotype column name(s).
+\item{pheno_file}{Character or \code{NULL}. Path to the phenotype file
+(tab- or comma-separated). Optional when
+\code{pipeline_stage = "stage1_knockoff"}; required otherwise.}
+
+\item{phenotype}{Character \strong{vector} of phenotype column name(s),
+or \code{NULL} when \code{pipeline_stage = "stage1_knockoff"}.
 When multiple phenotypes are provided, samples with missing values in
 \emph{any} phenotype or covariate are removed once before any analysis,
-knockoffs are generated on the first pass and automatically reused for
-subsequent phenotypes (requires \code{save_knockoff = TRUE} or
-\code{NULL}).}
+knockoffs are generated and persisted internally on the first pass and
+reused for all subsequent phenotypes.}
 
 \item{pheno_id}{Character or \code{NULL}. Column name of the sample ID
 in the phenotype file. \code{NULL} assumes rows are already aligned with
@@ -106,11 +107,13 @@ genotype/phenotype data is validated automatically, with warnings
 for any discrepancies.}
 }}
 
-\item{save_knockoff}{Logical or \code{NULL}. Whether to save generated
-knockoffs to \code{knockoff_dir}.
-\code{NULL} (default) sets this automatically: \code{TRUE} when
-\code{pipeline_stage = "stage1_knockoff"} or when multiple phenotypes
-are provided; \code{FALSE} otherwise.}
+\item{save_knockoff}{Logical or \code{NULL}. Controls whether the knockoff
+directory is \strong{retained} after the run completes.
+\code{NULL} (default) sets this automatically to \code{TRUE} when
+\code{pipeline_stage = "stage1_knockoff"}, and \code{FALSE} otherwise.
+For multi-phenotype runs knockoffs are always written to disk internally
+during the run (so they can be reused across phenotypes), but they are
+deleted at the end if \code{save_knockoff = FALSE}.}
 
 \item{knockoff_dir}{Character or \code{NULL}. Directory for knockoff
 \code{.rds} files.  Defaults to \code{<outdir>/knockoffs}.  Must be

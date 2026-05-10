@@ -83,14 +83,14 @@ run_pipeline(
 |--------------|----------------------------------------------------------|
 | `outdir`     | Output directory (created automatically if absent)       |
 | `test_type`  | `"Single_Window"` or `"Gene_Centric"`                   |
-| `pheno_file` | Phenotype file (CSV/TSV)                                 |
 | `geno_file`  | PLINK genotype file prefix (`.bed/.bim/.fam`)            |
-| `phenotype`  | Column name(s) of phenotype(s) — scalar or character vector |
 
 ### Optional
 
 | Argument                  | Description                                                                                      | Default               |
 |---------------------------|--------------------------------------------------------------------------------------------------|-----------------------|
+| `pheno_file`              | Phenotype file (CSV/TSV). Optional for `pipeline_stage = "stage1_knockoff"`; required otherwise | `NULL`                |
+| `phenotype`               | Column name(s) of phenotype(s). Optional for `pipeline_stage = "stage1_knockoff"`               | `NULL`                |
 | `pheno_id`                | Column name of sample ID in phenotype file                                                       | `NULL`                |
 | `covar_cols`              | Continuous covariate column names                                                                | `NULL`                |
 | `cat_covar_cols`          | Categorical covariate column names                                                               | `NULL`                |
@@ -107,7 +107,7 @@ run_pipeline(
 | `batch_size`              | Genes per batch (Gene_Centric only)                                                              | `20`                  |
 | `read_mid_exist`          | Skip chromosomes with existing intermediate files                                                | `TRUE`                |
 | **`pipeline_stage`**      | `"full"`, `"stage1_knockoff"`, or `"stage2_analysis"` — see below                              | `"full"`              |
-| **`save_knockoff`**       | Save generated knockoffs to disk (`TRUE`/`FALSE`/`NULL` for auto)                               | `NULL`                |
+| **`save_knockoff`**       | Whether to retain the knockoff directory after the run completes                                 | `NULL`                |
 | **`knockoff_dir`**        | Directory for knockoff `.rds` files (defaults to `<outdir>/knockoffs`)                           | `NULL`                |
 
 ---
@@ -119,7 +119,7 @@ run_pipeline(
 Pass a character vector to `phenotype`. The pipeline:
 
 1. Removes samples missing in **any** phenotype or covariate once, producing a single consistent sample set.
-2. Generates knockoffs on the first phenotype pass and **automatically saves and reloads** them for all subsequent phenotypes (since knockoffs depend only on genotype, not phenotype).
+2. Generates knockoffs on the first phenotype pass and **always persists them internally** so all subsequent phenotypes can reuse them.
 3. Writes per-phenotype results to `<outdir>/<phenotype_name>/`.
 
 ```R
@@ -135,13 +135,19 @@ run_pipeline(
 
 ### Knockoff Persistence (`save_knockoff`)
 
-Set `save_knockoff = TRUE` to save generated knockoffs to `knockoff_dir` (one `.rds` file per LD block or per gene, under `<knockoff_dir>/chr<c>/`). On subsequent analyses with the same genotype data but a different phenotype file, set `load_knockoff = TRUE` (handled automatically when `save_knockoff = TRUE`) to skip knockoff generation entirely.
+`save_knockoff` now controls whether the knockoff directory is **retained after the run completes**.
+
+- `save_knockoff = TRUE`: keep `knockoff_dir` on disk after the run
+- `save_knockoff = FALSE`: allow temporary on-disk knockoff files during the run, but remove them at the end
+- `save_knockoff = NULL`: resolve automatically to `TRUE` for `pipeline_stage = "stage1_knockoff"` and `FALSE` otherwise
+
+In multi-phenotype runs, knockoffs are always written to disk internally so later phenotypes can reuse them. If `save_knockoff = FALSE`, that directory is deleted after the final phenotype finishes.
 
 ```R
-# First run: generate and save
+# Keep knockoffs after the run
 run_pipeline(..., save_knockoff = TRUE)
 
-# Later run: load saved knockoffs
+# Later run: reuse previously saved knockoffs
 run_pipeline(..., pipeline_stage = "stage2_analysis", knockoff_dir = "results/knockoffs")
 ```
 
@@ -156,7 +162,7 @@ The pipeline can be split into two independent stages, useful when knockoff gene
 | `pipeline_stage`       | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
 | `"full"` (default)     | Complete end-to-end pipeline                                                 |
-| `"stage1_knockoff"`    | Generate and save knockoffs only; write sample list; no association testing  |
+| `"stage1_knockoff"`    | Generate knockoffs only; write sample list; no association testing           |
 | `"stage2_analysis"`    | Load saved knockoffs; fit null models; run association tests                 |
 
 **Stage 1:**
@@ -165,9 +171,7 @@ The pipeline can be split into two independent stages, useful when knockoff gene
 run_pipeline(
   outdir         = "results/",
   test_type      = "Gene_Centric",
-  pheno_file     = "data/pheno.csv",   # used only to determine the sample set
   geno_file      = "data/geno",
-  phenotype      = "BMI",
   pipeline_stage = "stage1_knockoff",
   knockoff_dir   = "results/knockoffs"
 )
@@ -225,7 +229,7 @@ The pipeline will detect existing per-chromosome intermediate files and skip com
 | `manhattan_plot_gene.png`             | Manhattan / Q–Q plot             |
 | `mid/GeneCentric_mid_results_chr*.txt`| Per-chromosome intermediate      |
 
-### Knockoffs (when `save_knockoff = TRUE`)
+### Knockoffs (when retained, or during internal multi-phenotype reuse)
 
 | File                                           | Description                                 |
 |------------------------------------------------|---------------------------------------------|

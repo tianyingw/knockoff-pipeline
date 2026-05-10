@@ -7,15 +7,16 @@
 #' @param outdir        Character. Output directory (created recursively if absent).
 #' @param test_type     Character. One of \code{"Single_Window"} or
 #'   \code{"Gene_Centric"}.
-#' @param pheno_file    Character. Path to the phenotype file (tab- or
-#'   comma-separated).
+#' @param pheno_file    Character or \code{NULL}. Path to the phenotype file
+#'   (tab- or comma-separated). Optional when
+#'   \code{pipeline_stage = "stage1_knockoff"}; required otherwise.
 #' @param geno_file     Character. PLINK genotype file prefix (no extension).
-#' @param phenotype     Character \strong{vector} of phenotype column name(s).
+#' @param phenotype     Character \strong{vector} of phenotype column name(s),
+#'   or \code{NULL} when \code{pipeline_stage = "stage1_knockoff"}.
 #'   When multiple phenotypes are provided, samples with missing values in
 #'   \emph{any} phenotype or covariate are removed once before any analysis,
-#'   knockoffs are generated on the first pass and automatically reused for
-#'   subsequent phenotypes (requires \code{save_knockoff = TRUE} or
-#'   \code{NULL}).
+#'   knockoffs are generated and persisted internally on the first pass and
+#'   reused for all subsequent phenotypes.
 #' @param pheno_id      Character or \code{NULL}. Column name of the sample ID
 #'   in the phenotype file. \code{NULL} assumes rows are already aligned with
 #'   the PLINK \code{.fam} file.
@@ -56,11 +57,13 @@
 #'       genotype/phenotype data is validated automatically, with warnings
 #'       for any discrepancies.}
 #'   }
-#' @param save_knockoff Logical or \code{NULL}. Whether to save generated
-#'   knockoffs to \code{knockoff_dir}.
-#'   \code{NULL} (default) sets this automatically: \code{TRUE} when
-#'   \code{pipeline_stage = "stage1_knockoff"} or when multiple phenotypes
-#'   are provided; \code{FALSE} otherwise.
+#' @param save_knockoff Logical or \code{NULL}. Controls whether the knockoff
+#'   directory is \strong{retained} after the run completes.
+#'   \code{NULL} (default) sets this automatically to \code{TRUE} when
+#'   \code{pipeline_stage = "stage1_knockoff"}, and \code{FALSE} otherwise.
+#'   For multi-phenotype runs knockoffs are always written to disk internally
+#'   during the run (so they can be reused across phenotypes), but they are
+#'   deleted at the end if \code{save_knockoff = FALSE}.
 #' @param knockoff_dir  Character or \code{NULL}. Directory for knockoff
 #'   \code{.rds} files.  Defaults to \code{<outdir>/knockoffs}.  Must be
 #'   provided (and populated) when \code{pipeline_stage =
@@ -91,9 +94,9 @@
 run_pipeline <- function(
   outdir,
   test_type,
-  pheno_file,
   geno_file,
-  phenotype,
+  pheno_file              = NULL,
+  phenotype               = NULL,
   pheno_id                = NULL,
   covar_cols              = NULL,
   cat_covar_cols          = NULL,
@@ -121,9 +124,7 @@ run_pipeline <- function(
 
   stopifnot(
     "outdir must be a single non-empty string"        = is.character(outdir)     && length(outdir)     == 1L && nzchar(outdir),
-    "pheno_file must be a single non-empty string"    = is.character(pheno_file) && length(pheno_file) == 1L && nzchar(pheno_file),
     "geno_file must be a single non-empty string"     = is.character(geno_file)  && length(geno_file)  == 1L && nzchar(geno_file),
-    "phenotype must be a non-empty character vector"  = is.character(phenotype)  && length(phenotype)  >= 1L && all(nzchar(phenotype)),
     "M must be a positive integer"                    = is.numeric(M)            && length(M)          == 1L && M >= 1L,
     "fdr must be numeric in (0, 1)"                   = is.numeric(fdr)          && length(fdr)        == 1L && fdr > 0 && fdr < 1,
     "user_cores must be a positive integer"           = is.numeric(user_cores)   && length(user_cores) == 1L && user_cores >= 1L,
@@ -151,8 +152,14 @@ run_pipeline <- function(
   chr_vector  <- intersect(chr_numeric, 1L:22L)
   if (length(chr_vector) == 0L) stop("No valid autosomes (1-22) in 'chromosomes'.")
 
-  if (!file.exists(pheno_file))
-    stop("Phenotype file not found: ", pheno_file)
+  if (pipeline_stage != "stage1_knockoff") {
+    if (is.null(pheno_file) || !is.character(pheno_file) || length(pheno_file) != 1L || !nzchar(pheno_file))
+      stop("'pheno_file' is required for pipeline_stage = \"", pipeline_stage, "\".")
+    if (!file.exists(pheno_file))
+      stop("Phenotype file not found: ", pheno_file)
+    if (is.null(phenotype) || !is.character(phenotype) || length(phenotype) == 0L || !all(nzchar(phenotype)))
+      stop("'phenotype' must be a non-empty character vector for pipeline_stage = \"", pipeline_stage, "\".")
+  }
   plink_fam <- paste0(geno_file, ".fam")
   if (!file.exists(plink_fam))
     stop("PLINK .fam not found: ", plink_fam, "\nCheck that 'geno_file' is the correct prefix.")
@@ -161,20 +168,20 @@ run_pipeline <- function(
   # 2.  Resolve save/load flags
   # ---------------------------------------------------------------------------
 
-  multi_pheno <- length(phenotype) > 1L
+  multi_pheno <- !is.null(phenotype) && length(phenotype) > 1L
 
-  # Auto-resolve save_knockoff
+  # save_knockoff controls retention after the run, not whether temporary
+  # on-disk persistence may be needed internally during the run.
   if (is.null(save_knockoff))
-    save_knockoff <- (pipeline_stage == "stage1_knockoff") || multi_pheno
+    save_knockoff <- (pipeline_stage == "stage1_knockoff")
 
   if (pipeline_stage == "stage1_knockoff" && !isTRUE(save_knockoff))
     stop("pipeline_stage = 'stage1_knockoff' requires save_knockoff = TRUE (or NULL).")
   if (pipeline_stage == "stage2_analysis" && is.null(knockoff_dir))
     stop("pipeline_stage = 'stage2_analysis' requires 'knockoff_dir' to be specified.")
-  if (multi_pheno && !isTRUE(save_knockoff))
-    warning("Multiple phenotypes provided but save_knockoff = FALSE. ",
-            "Knockoffs will be regenerated for each phenotype independently, ",
-            "which is less efficient and breaks exchangeability across phenotypes.")
+
+  # internal_persist: whether knockoffs must be written to disk during the run.
+  internal_persist <- (pipeline_stage == "stage1_knockoff") || multi_pheno
 
   # Resolve knockoff directory
   if (is.null(knockoff_dir)) knockoff_dir <- file.path(outdir, "knockoffs")
@@ -185,78 +192,86 @@ run_pipeline <- function(
   # ---------------------------------------------------------------------------
 
   if (!dir.exists(outdir)) { message("Creating output directory: ", outdir); dir.create(outdir, recursive = TRUE) }
-  if (isTRUE(save_knockoff) && !dir.exists(knockoff_dir)) {
+  if (internal_persist && !dir.exists(knockoff_dir)) {
     message("Creating knockoff directory: ", knockoff_dir); dir.create(knockoff_dir, recursive = TRUE)
   }
   if (user_cores > 1L) Sys.setenv(MKL_NUM_THREADS = 1)
 
   # ---------------------------------------------------------------------------
-  # 4.  Load phenotype file; remove samples missing in ANY phenotype / covariate
+  # 4.  Determine sample set
+  #     stage1_knockoff : phenotype not required — derive Gsub.id from .fam.
+  #     full / stage2   : load phenotype file, filter missing, align to .fam.
   # ---------------------------------------------------------------------------
 
-  message("Reading phenotype file: ", pheno_file)
-  pheno <- data.table::fread(pheno_file)
-
-  missing_pheno <- setdiff(phenotype, colnames(pheno))
-  if (length(missing_pheno) > 0L)
-    stop("Phenotype column(s) not found: ", paste(missing_pheno, collapse = ", "))
-
-  all_covar_cols <- c(covar_cols, cat_covar_cols)
-  missing_covar  <- setdiff(all_covar_cols, colnames(pheno))
-  if (length(missing_covar) > 0L)
-    stop("Covariate column(s) not found: ", paste(missing_covar, collapse = ", "))
-  if (!is.null(pheno_id) && !pheno_id %in% colnames(pheno))
-    stop("Sample ID column \"", pheno_id, "\" not found in phenotype file.")
-
-  # Drop rows missing in ANY phenotype or covariate (single consistent sample set)
-  check_cols    <- unique(c(phenotype, all_covar_cols))
-  complete_mask <- complete.cases(pheno[, check_cols, with = FALSE])
-  n_incomplete  <- sum(!complete_mask)
-  if (n_incomplete > 0L) {
-    message(sprintf(
-      "%d sample(s) removed: missing in at least one of [%s].",
-      n_incomplete, paste(check_cols, collapse = ", ")
-    ))
-    pheno <- pheno[complete_mask]
-  }
-  message(nrow(pheno), " sample(s) retained after missing-value filtering.")
-
-  # ---------------------------------------------------------------------------
-  # 5.  Align phenotype file to PLINK .fam
-  # ---------------------------------------------------------------------------
-
-  fam <- data.table::fread(plink_fam, header = FALSE,
-                           col.names = c("FID","IID","PAT","MAT","SEX","PHENO"))
-  plink_keep_fam <- NULL
-
-  if (!is.null(pheno_id)) {
-    pheno_iid  <- as.numeric(pheno[[pheno_id]])
-    fam_iid    <- as.numeric(fam$IID)
-    shared_iid <- intersect(fam_iid, pheno_iid)   # keeps .fam order
-
-    if (length(shared_iid) == 0L)
-      stop("No samples matched between phenotype (column \"", pheno_id,
-           "\") and PLINK .fam.\n",
-           "  Example pheno IID : ", paste(head(pheno_iid, 3L), collapse = ", "), "\n",
-           "  Example .fam  IID : ", paste(head(fam_iid,   3L), collapse = ", "))
-
-    n_pheno_only <- length(setdiff(pheno_iid, fam_iid))
-    n_fam_only   <- length(setdiff(fam_iid,   pheno_iid))
-    if (n_pheno_only > 0L) message("  ", n_pheno_only, " sample(s) in phenotype not in .fam — excluded.")
-    if (n_fam_only   > 0L) message("  ", n_fam_only,   " sample(s) in .fam not in phenotype — excluded.")
-    message("  ", length(shared_iid), " sample(s) matched.")
-
-    plink_keep_fam <- fam[match(shared_iid, fam_iid), .(FID, IID)]
-    pheno   <- pheno[match(shared_iid, pheno_iid)]
-    Gsub.id <- shared_iid
-
+  if (pipeline_stage == "stage1_knockoff") {
+    fam <- data.table::fread(plink_fam, header = FALSE,
+                             col.names = c("FID","IID","PAT","MAT","SEX","PHENO"))
+    Gsub.id <- as.numeric(fam$IID)
+    plink_keep_fam <- fam[, .(FID, IID)]
+    pheno <- NULL
+    all_covar_cols <- NULL
+    message(nrow(fam), " sample(s) read from .fam for knockoff generation.")
+    rm(fam); gc()
   } else {
-    if (nrow(pheno) != nrow(fam))
-      stop("pheno_id is NULL but phenotype has ", nrow(pheno),
-           " rows while .fam has ", nrow(fam), " rows.")
-    Gsub.id <- NULL
+    message("Reading phenotype file: ", pheno_file)
+    pheno <- data.table::fread(pheno_file)
+
+    missing_pheno <- setdiff(phenotype, colnames(pheno))
+    if (length(missing_pheno) > 0L)
+      stop("Phenotype column(s) not found: ", paste(missing_pheno, collapse = ", "))
+
+    all_covar_cols <- c(covar_cols, cat_covar_cols)
+    missing_covar  <- setdiff(all_covar_cols, colnames(pheno))
+    if (length(missing_covar) > 0L)
+      stop("Covariate column(s) not found: ", paste(missing_covar, collapse = ", "))
+    if (!is.null(pheno_id) && !pheno_id %in% colnames(pheno))
+      stop("Sample ID column \"", pheno_id, "\" not found in phenotype file.")
+
+    check_cols    <- unique(c(phenotype, all_covar_cols))
+    complete_mask <- complete.cases(pheno[, check_cols, with = FALSE])
+    n_incomplete  <- sum(!complete_mask)
+    if (n_incomplete > 0L) {
+      message(sprintf(
+        "%d sample(s) removed: missing in at least one of [%s].",
+        n_incomplete, paste(check_cols, collapse = ", ")
+      ))
+      pheno <- pheno[complete_mask]
+    }
+    message(nrow(pheno), " sample(s) retained after missing-value filtering.")
+
+    fam <- data.table::fread(plink_fam, header = FALSE,
+                             col.names = c("FID","IID","PAT","MAT","SEX","PHENO"))
+    plink_keep_fam <- NULL
+
+    if (!is.null(pheno_id)) {
+      pheno_iid  <- as.numeric(pheno[[pheno_id]])
+      fam_iid    <- as.numeric(fam$IID)
+      shared_iid <- intersect(fam_iid, pheno_iid)
+
+      if (length(shared_iid) == 0L)
+        stop("No samples matched between phenotype (column \"", pheno_id,
+             "\") and PLINK .fam.\n",
+             "  Example pheno IID : ", paste(head(pheno_iid, 3L), collapse = ", "), "\n",
+             "  Example .fam  IID : ", paste(head(fam_iid,   3L), collapse = ", "))
+
+      n_pheno_only <- length(setdiff(pheno_iid, fam_iid))
+      n_fam_only   <- length(setdiff(fam_iid,   pheno_iid))
+      if (n_pheno_only > 0L) message("  ", n_pheno_only, " sample(s) in phenotype not in .fam — excluded.")
+      if (n_fam_only   > 0L) message("  ", n_fam_only,   " sample(s) in .fam not in phenotype — excluded.")
+      message("  ", length(shared_iid), " sample(s) matched.")
+
+      plink_keep_fam <- fam[match(shared_iid, fam_iid), .(FID, IID)]
+      pheno   <- pheno[match(shared_iid, pheno_iid)]
+      Gsub.id <- shared_iid
+    } else {
+      if (nrow(pheno) != nrow(fam))
+        stop("pheno_id is NULL but phenotype has ", nrow(pheno),
+             " rows while .fam has ", nrow(fam), " rows.")
+      plink_keep_fam <- fam[, .(FID, IID)]
+      Gsub.id <- NULL
+    }
+    rm(fam); gc()
   }
-  rm(fam); gc()
 
   # ---------------------------------------------------------------------------
   # 6.  Stage 2: validate saved knockoff sample list; restrict sample set
@@ -300,7 +315,7 @@ run_pipeline <- function(
   } else {
     # stage1 or full: determine and (optionally) write the canonical IDs
     knockoff_sample_ids <- if (!is.null(Gsub.id)) Gsub.id else seq_len(nrow(pheno))
-    if (isTRUE(save_knockoff)) {
+    if (internal_persist) {
       writeLines(as.character(knockoff_sample_ids), knockoff_sample_file)
       message("Knockoff sample list written to: ", knockoff_sample_file)
     }
@@ -409,8 +424,8 @@ run_pipeline <- function(
     }
 
     # ---- Knockoff flags for this pass ---------------------------------------
-    ko_save <- isTRUE(save_knockoff) && !knockoffs_ready
-    ko_load <- isTRUE(save_knockoff) &&  knockoffs_ready
+    ko_save <- internal_persist && !knockoffs_ready
+    ko_load <- internal_persist &&  knockoffs_ready
 
     # ---- Branch by test type ------------------------------------------------
     if (test_type == "Single_Window") {
@@ -465,6 +480,11 @@ run_pipeline <- function(
 
     knockoffs_ready <- TRUE   # knockoffs now exist on disk for subsequent phenotypes
     gc()
+  }
+
+  if (multi_pheno && !isTRUE(save_knockoff) && dir.exists(knockoff_dir)) {
+    unlink(knockoff_dir, recursive = TRUE)
+    message("Knockoff directory removed (save_knockoff = FALSE).")
   }
 
   invisible(TRUE)
