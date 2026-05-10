@@ -227,6 +227,7 @@ run_pipeline <- function(
 
   fam <- data.table::fread(plink_fam, header = FALSE,
                            col.names = c("FID","IID","PAT","MAT","SEX","PHENO"))
+  plink_keep_fam <- NULL
 
   if (!is.null(pheno_id)) {
     pheno_iid  <- as.numeric(pheno[[pheno_id]])
@@ -245,6 +246,7 @@ run_pipeline <- function(
     if (n_fam_only   > 0L) message("  ", n_fam_only,   " sample(s) in .fam not in phenotype — excluded.")
     message("  ", length(shared_iid), " sample(s) matched.")
 
+    plink_keep_fam <- fam[match(shared_iid, fam_iid), .(FID, IID)]
     pheno   <- pheno[match(shared_iid, pheno_iid)]
     Gsub.id <- shared_iid
 
@@ -289,6 +291,7 @@ run_pipeline <- function(
 
     # Restrict pheno to the common set in saved-ids order for row alignment
     if (!is.null(Gsub.id)) {
+      plink_keep_fam <- plink_keep_fam[match(common_ids, Gsub.id)]
       pheno   <- pheno[match(common_ids, as.numeric(pheno[[pheno_id]]))]
       Gsub.id <- common_ids
     }
@@ -369,13 +372,37 @@ run_pipeline <- function(
       if (!is.null(pheno_id)) nm_args$id <- pheno[[pheno_id]]
       nullobj <- do.call(Fit_null_model, nm_args)
     } else {
+      saige_input_dir <- file.path(p_outdir, "saige_input")
+      if (!dir.exists(saige_input_dir)) dir.create(saige_input_dir, recursive = TRUE)
+
+      pheno_saige_file <- file.path(saige_input_dir, paste0("pheno_", pheno_name, ".tsv"))
+      data.table::fwrite(pheno, pheno_saige_file, sep = "\t")
+
+      geno_saige_prefix <- geno_file
+      if (!is.null(Gsub.id)) {
+        keep_fam_file <- file.path(saige_input_dir, "keep_samples.fam")
+        data.table::fwrite(plink_keep_fam, keep_fam_file, sep = "\t", col.names = FALSE)
+        geno_saige_prefix <- file.path(saige_input_dir, "geno_aligned")
+        plink_cmd <- sprintf(
+          '%s --bfile %s --keep-fam %s --make-bed --out %s --silent',
+          shQuote(plink_path),
+          shQuote(geno_file),
+          shQuote(keep_fam_file),
+          shQuote(geno_saige_prefix)
+        )
+        plink_status <- system(plink_cmd)
+        if (!identical(plink_status, 0L)) {
+          stop("PLINK failed while creating the phenotype-aligned genotype subset for SAIGE.")
+        }
+      }
+
       nullobj <- Fit_null_model_GLMM(
-        geno_file, pheno_file, pheno_name, plink_path,
+        geno_saige_prefix, pheno_saige_file, pheno_name, plink_path,
         outcome_type       = out_type,
         sample_id_col      = pheno_id,
         covar_cols         = covar_cols,
         cat_covar_cols     = cat_covar_cols,
-        output_prefix      = file.path(outdir, "saige_output"),
+        output_prefix      = file.path(p_outdir, "saige_output"),
         sparse_grm_file    = grm_file,
         sparse_grm_id_file = grm_id_file
       )

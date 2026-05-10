@@ -160,6 +160,17 @@ Fit_null_model_GLMM <- function(plink_file,
     saige_args$sparseGRMFile <- paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx")
     saige_args$sparseGRMSampleIDFile <- paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx.sampleIDs.txt")
   }
+
+  sparse_grm_check <- Matrix::readMM(saige_args$sparseGRMFile)
+  diag_entries <- sum(Matrix::diag(sparse_grm_check) != 0)
+  off_diag_nnz <- Matrix::nnzero(sparse_grm_check) - diag_entries
+  if (off_diag_nnz <= 0) {
+    stop(
+      "No related sample pairs were detected in the sparse GRM at relatedness_cutoff = ",
+      relatedness_cutoff,
+      ". Samples appear unrelated; use sample_uncorrelated = TRUE instead of SAIGE/GLMM."
+    )
+  }
   # 执行SAIGE null model拟合
   saige_args$plinkFile <- analysis_prefix
   rda_file <- paste0(output_prefix, ".rda")
