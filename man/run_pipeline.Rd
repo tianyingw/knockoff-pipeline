@@ -14,9 +14,9 @@ run_pipeline(
   covar_cols = NULL,
   cat_covar_cols = NULL,
   user_cores = 1L,
-  sliding_window_length = NULL,
+  sliding_window_length = c(1000, 5000, 10000),
   geno_missing_imputation = "fixed",
-  plink_path = "plink",
+  plink_path = "plink2",
   M = 5L,
   genome_build = "hg19",
   sample_uncorrelated = TRUE,
@@ -62,13 +62,14 @@ names, or \code{NULL}.}
 
 \item{user_cores}{Integer. Number of parallel cores. Default \code{1}.}
 
-\item{sliding_window_length}{Integer or \code{NULL}. Sliding window size (bp).}
+\item{sliding_window_length}{Integer vector. Sliding window sizes (bp).
+Default \code{c(1000, 5000, 10000)}.}
 
 \item{geno_missing_imputation}{Character. Genotype imputation method.
 Default \code{"fixed"}.}
 
 \item{plink_path}{Character. Path to PLINK executable. Default
-\code{"plink"}.}
+\code{"plink2"}.}
 
 \item{M}{Integer. Number of knockoff copies. Default \code{5}.}
 

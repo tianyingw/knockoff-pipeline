@@ -80,6 +80,8 @@ run_pipeline(
 )
 ```
 
+Code blocks shown directly in this README are intended only to illustrate input structure; demo data and runnable demo scripts are introduced in the Examples section.
+
 ---
 
 ## Input Requirements
@@ -101,13 +103,14 @@ run_pipeline(
 | `pheno_id`                | Column name of sample ID in phenotype file                                                       | `NULL`                |
 | `covar_cols`              | Continuous covariate column names                                                                | `NULL`                |
 | `cat_covar_cols`          | Categorical covariate column names                                                               | `NULL`                |
-| `sliding_window_length`   | Window size (bp) for `Single_Window` mode                                                        | `"1000,5000,10000"`   |
+| `sliding_window_length`   | Window sizes (bp) for `Single_Window` mode                                                       | `c(1000, 5000, 10000)` |
 | `M`                       | Number of knockoff copies                                                                        | `5`                   |
 | `geno_missing_imputation` | Genotype imputation method (`"fixed"` or `"mean"`)                                               | `"fixed"`             |
-| `plink_path`              | Path to PLINK executable                                                                         | `"plink"`             |
+| `plink_path`              | Path to PLINK executable                                                                         | `"plink2"`            |
 | `genome_build`            | `"hg19"` or `"hg38"`                                                                             | `"hg19"`              |
 | `sample_uncorrelated`     | `TRUE` = GLM null model; `FALSE` = GLMM via SAIGE                                               | `TRUE`                |
 | `grm_file`                | Sparse GRM file (required only for `sample_uncorrelated = FALSE`)                                | `NULL`                |
+| `grm_id_file`             | Sparse GRM ID file                                                                               | `NULL`                |
 | `fdr`                     | Target FDR level                                                                                 | `0.1`                 |
 | `chromosomes`             | Autosomes to analyse                                                                             | `1:22`                |
 | `user_cores`              | Number of CPU threads                                                                            | `1`                   |

@@ -25,11 +25,12 @@
 #' @param cat_covar_cols Character vector of binary/categorical covariate column
 #'   names, or \code{NULL}.
 #' @param user_cores    Integer. Number of parallel cores. Default \code{1}.
-#' @param sliding_window_length Integer or \code{NULL}. Sliding window size (bp).
+#' @param sliding_window_length Integer vector. Sliding window sizes (bp).
+#'   Default \code{c(1000, 5000, 10000)}.
 #' @param geno_missing_imputation Character. Genotype imputation method.
 #'   Default \code{"fixed"}.
 #' @param plink_path    Character. Path to PLINK executable. Default
-#'   \code{"plink"}.
+#'   \code{"plink2"}.
 #' @param M             Integer. Number of knockoff copies. Default \code{5}.
 #' @param genome_build  Character. One of \code{"hg19"} or \code{"hg38"}.
 #' @param sample_uncorrelated Logical. \code{TRUE} fits a standard null model;
@@ -101,9 +102,9 @@ run_pipeline <- function(
   covar_cols              = NULL,
   cat_covar_cols          = NULL,
   user_cores              = 1L,
-  sliding_window_length   = NULL,
+  sliding_window_length   = c(1000, 5000, 10000),
   geno_missing_imputation = "fixed",
-  plink_path              = "plink",
+  plink_path              = "plink2",
   M                       = 5L,
   genome_build            = "hg19",
   sample_uncorrelated     = TRUE,
