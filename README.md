@@ -29,6 +29,13 @@ The pipeline supports:
 
 ### conda
 
+First, clone the repository and enter it.
+
+```bash
+git clone https://github.com/tianyingw/knockoff-pipeline.git
+cd knockoff-pipeline
+```
+
 #### 1. create a conda environment
 
 ```bash
@@ -48,10 +55,10 @@ Rscript inst/conda_env/install_packages.R
 #### 3. Install SAIGE
 
 ```bash
-R CMD INSTALL SAIGE
+R CMD INSTALL SAIGE_new
 ```
 
-#### 4. Install KnockoffPipeline
+#### 4. Install KnockoffPipeline in R
 
 ```R
 devtools::install_github("tianyingw/knockoff-pipeline")
