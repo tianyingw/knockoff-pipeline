@@ -13,6 +13,10 @@ The pipeline supports:
 - **Knockoff persistence**: save generated knockoffs and reload them across sessions
 - **Two-stage workflow**: decouple knockoff generation from association testing
 
+## Workflow
+
+![KnockoffPipeline workflow](workflow.jpg)
+
 ---
 
 ## Supported Methods
@@ -36,7 +40,7 @@ git clone https://github.com/tianyingw/knockoff-pipeline.git
 cd knockoff-pipeline
 ```
 
-#### 1. create a conda environment
+#### 1. Create a conda environment
 
 ```bash
 conda env create -f inst/conda_env/environment.yml
@@ -46,7 +50,7 @@ export LDFLAGS="-L${FLAGPATH}/lib"
 export CPPFLAGS="-I${FLAGPATH}/include"
 ```
 
-#### 2. Check and install R dependencies
+#### 2. Install R dependencies
 
 ```bash
 Rscript inst/conda_env/install_packages.R
@@ -66,7 +70,33 @@ devtools::install_github("tianyingw/knockoff-pipeline")
 
 ---
 
-## Quick Start
+## Runnable Examples (Quick Start)
+
+The runnable demo data and scripts are provided under `inst/examples/`.
+
+| Script             | Description                                      |
+|--------------------|--------------------------------------------------|
+| `SNP_Window.R`     | SNP/window-level analysis, unrelated samples     |
+| `Gene_unrelated.R` | Gene-centric analysis, unrelated samples         |
+| `Gene_related.R`   | Gene-centric analysis, related samples (BIGKnock) |
+
+Run an example from the package root:
+
+```bash
+Rscript inst/examples/SNP_Window.R
+```
+
+By default, the example scripts read demo input from `inst/examples/input/` and write output to `inst/examples/output/`. You can override the output directory, PLINK executable, and CPU cores with environment variables:
+
+```bash
+KNOCKOFF_OUTDIR=results/demo PLINK_BIN=plink2 KNOCKOFF_CORES=2 Rscript inst/examples/SNP_Window.R
+```
+
+---
+
+## Input Structure Examples
+
+Code blocks in the sections below are intended only to illustrate input structure and common argument combinations. They are not complete runnable examples. Use the scripts in the Quick Start section for runnable demo data and commands.
 
 ```R
 library(KnockoffPipeline)
@@ -79,8 +109,6 @@ run_pipeline(
   phenotype  = "BMI"
 )
 ```
-
-Code blocks shown directly in this README are intended only to illustrate input structure; demo data and runnable demo scripts are introduced in the Examples section.
 
 ---
 
@@ -123,6 +151,8 @@ Code blocks shown directly in this README are intended only to illustrate input 
 ---
 
 ## Key Features
+
+The `run_pipeline()` snippets in this section are schematic usage patterns, not standalone runnable scripts. They use placeholder paths and may omit required context; use the Quick Start scripts above for commands that run directly on the bundled demo data.
 
 ### Multiple Phenotypes
 
@@ -208,7 +238,7 @@ Stage 2 reads `knockoff_sample_list.txt`, computes the intersection with the cur
 
 ---
 
-## Checkpoint Recovery
+### Checkpoint Recovery
 
 The pipeline supports automatic restart from intermediate results. Set:
 
@@ -222,45 +252,34 @@ The pipeline will detect existing per-chromosome intermediate files and skip com
 
 ## Output Files
 
+Use `<analysis_outdir>` below for the directory that receives one analysis result set. For a single phenotype, `<analysis_outdir>` is `<outdir>`. For multiple phenotypes, each phenotype gets its own `<analysis_outdir>` at `<outdir>/<phenotype_name>`. Intermediate files are written under `<analysis_outdir>/mid/`.
+
 ### Single_Window
 
 | File                                  | Description                      |
 |---------------------------------------|----------------------------------|
-| `Single_Window_results.csv`           | Full results table               |
-| `manhattan_plot_single.png`           | Manhattan / Q–Q plot             |
-| `mid/Single_mid_results_chr*.txt`     | Per-chromosome intermediate SNP  |
-| `mid/Window_mid_results_chr*.txt`     | Per-chromosome intermediate window |
+| `<analysis_outdir>/Single_Window_results.csv`  | Full results table               |
+| `<analysis_outdir>/manhattan_plot_single.png`  | Manhattan / Q–Q plot             |
+| `<analysis_outdir>/mid/Single_mid_results_chr*.txt` | Per-chromosome intermediate SNP  |
+| `<analysis_outdir>/mid/Window_mid_results_chr*.txt` | Per-chromosome intermediate window |
 
 ### Gene_Centric
 
 | File                                  | Description                      |
 |---------------------------------------|----------------------------------|
-| `GeneCentric_results.csv`             | Full results table               |
-| `manhattan_plot_gene.png`             | Manhattan / Q–Q plot             |
-| `mid/GeneCentric_mid_results_chr*.txt`| Per-chromosome intermediate      |
+| `<analysis_outdir>/GeneCentric_results.csv`    | Full results table               |
+| `<analysis_outdir>/manhattan_plot_gene.png`    | Manhattan / Q–Q plot             |
+| `<analysis_outdir>/mid/GeneCentric_mid_results_chr*.txt` | Per-chromosome intermediate      |
 
 ### Knockoffs (when retained, or during internal multi-phenotype reuse)
 
 | File                                           | Description                                 |
 |------------------------------------------------|---------------------------------------------|
-| `knockoffs/knockoff_sample_list.txt`           | Sample IID list in knockoff row order       |
-| `knockoffs/chr<c>/block_XXXX_knockoff.rds`    | Per-LD-block knockoff (Single_Window)       |
-| `knockoffs/chr<c>/gene_<ID>_ko.rds`           | Per-gene knockoff, gene buffer only (Gene_Centric) |
+| `<knockoff_dir>/knockoff_sample_list.txt`      | Sample IID list in knockoff row order       |
+| `<knockoff_dir>/chr<c>/block_XXXX_knockoff.rds` | Per-LD-block knockoff (Single_Window)       |
+| `<knockoff_dir>/chr<c>/gene_<ID>_ko.rds`       | Per-gene knockoff, gene buffer only (Gene_Centric) |
 
 ### Multi-phenotype runs
 
 Results for each phenotype are written to `<outdir>/<phenotype_name>/`.
 
----
-
-## Examples
-
-Demo scripts are provided under `inst/examples/`:
-
-| Script                 | Description                                        |
-|------------------------|----------------------------------------------------|
-| `SNP_Window.R`         | SNP/window-level analysis, unrelated samples       |
-| `Gene_unrelated.R`     | Gene-centric analysis, unrelated samples           |
-| `Gene_related.R`       | Gene-centric analysis, related samples (BIGKnock)  |
-<!-- | `MultiPheno.R`         | Multi-phenotype run with shared knockoffs          |
-| `TwoStage.R`           | Stage 1 + Stage 2 split workflow                   | -->
