@@ -197,8 +197,11 @@ run_batch_gene <- function(
 
 # .gene_ko_load_or_gen -------------------------------------------------------
 # Load gene_buffer knockoff from RDS, or generate fresh.
-# Validates both row count (sample IDs) AND column count (SNP positions).
-# If either mismatches, warns and regenerates.
+# Validates column count (SNP positions):
+#   mismatch → regenerate (SCIP dependency structure has changed).
+# Validates sample overlap:
+#   current ⊆ saved → row-subset (safe: marginal exchangeability holds)
+#   current ⊄ saved → regenerate (new samples never participated in SCIP fit)
 #
 # Knockoff RDS format:
 #   $G_gene_buffer_knockoff  — array [M × n × p_gene_buffer]
@@ -231,12 +234,20 @@ run_batch_gene <- function(
           saved_p, p_expected
         ))
       } else {
-        # Reindex rows: align saved sample order to current matched_ids
-        row_map <- match(as.numeric(matched_ids), as.numeric(ko_obj$sample_ids))
-        if (any(is.na(row_map))) {
-          warning(sum(is.na(row_map)),
-                  " sample(s) not found in saved knockoff — regenerating.")
+        # Column counts match — check sample overlap before reusing
+        current_ids <- as.numeric(matched_ids)
+        saved_ids   <- as.numeric(ko_obj$sample_ids)
+
+        if (.need_regenerate_samples(current_ids, saved_ids)) {
+          n_new <- sum(!current_ids %in% saved_ids)
+          warning(sprintf(
+            "%d sample(s) in current data not found in saved knockoff — regenerating.",
+            n_new
+          ))
+          # need_generate remains TRUE
         } else {
+          # Current samples ⊆ saved samples — reindex rows (subset, safe under exchangeability)
+          row_map <- match(current_ids, saved_ids)
           arr           <- arr[, row_map, , drop = FALSE]
           need_generate <- FALSE
         }
@@ -298,6 +309,6 @@ GeneScan3DKnock_Summary <- function(result, M, fdr = 0.1) {
   result$W           <- res$W
   result$W_Threshold <- rep(res$W.threshold, nrow(result))
   result$Qvalue      <- res$Qvalue
-  result$detect      <- res$Qvalue <= fdr
+  result$indicator   <- res$Qvalue <= fdr
   return(result)
 }

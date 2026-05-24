@@ -118,7 +118,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       colnames(temp.summary.single)<-c('chr','start','end','actual_start','actual_end',
                                        'signal',
                                        'kappa','tau',
-                                       'W_KS','P_KS',paste0('P_KS_k',1:M),'MAF')
+                                       'W','P_KS',paste0('P_KS_k',1:M),'MAF')
       if(length(midout.dir)!=0){
         write.table(temp.summary.single,paste0(midout.dir,jobtitle,'_single_',chr,':',start,'-',end,'.txt'),sep='\t',row.names=F,col.names=T,quote=F)
       }
@@ -201,7 +201,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       colnames(temp.summary.window)[1:(grep('burden_MAF',colnames(temp.summary.window))-1)]<-c('chr','start','end','actual_start','actual_end',
                                                                                                'signal',
                                                                                                'kappa','tau',
-                                                                                               'W_KS','P_KS',paste0('P_KS_k',1:M))
+                                                                                               'W','P_KS',paste0('P_KS_k',1:M))
       if(length(midout.dir)!=0){
         write.table(temp.summary.window,paste0(midout.dir,jobtitle,'_window_',chr,':',start,'-',end,'.txt'),sep='\t',row.names=F,col.names=T,quote=F)
       }
@@ -405,7 +405,7 @@ KS_summary<-function(result.window,result.single,M,fdr=0.1){
     Qvalue = q,
     W_Threshold = threshold,
     result[, -(1:5), drop = FALSE],
-    detect = ifelse(q <= fdr, "TRUE", "FALSE"),
+    indicator = q <= fdr,
     stringsAsFactors = FALSE
   )
   return(result.summary)

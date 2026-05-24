@@ -2,7 +2,7 @@ plot_manhattan <- function(result_all, out_path, title = 'Manhattan plot (W stat
   manhattan_data <- data.frame(
     CHR = result_all[,"chr"],
     BP = (result_all[,"start"] + result_all[,"end"]) %/% 2,
-    P = result_all[,"W_KS"]
+    P = result_all[,"W"]
   )
   manhattan_data$SNP <- paste0(manhattan_data$CHR, ":", manhattan_data$BP)
   # manhattan_data$P[!is.finite(manhattan_data$P)] <- 0

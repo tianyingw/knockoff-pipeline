@@ -122,13 +122,23 @@ Single_Window_Analysis <- function(
         ))
         # need_generate remains TRUE → fall through to generation below
       } else {
-        # Column counts match — reindex rows to current Gsub.id order
+        # Column counts match — check sample overlap before reusing
         target_ids <- if (!is.null(Gsub.id)) Gsub.id else knockoff_sample_ids
-        if (!is.null(target_ids) && !is.null(ko_obj$sample_ids)) {
+        saved_ids  <- ko_obj$sample_ids
+
+        if (.need_regenerate_samples(target_ids, saved_ids)) {
+          n_new <- sum(!as.numeric(target_ids) %in% as.numeric(saved_ids))
+          warning(sprintf(
+            "Block chr%s: %d sample(s) in current data not found in saved knockoff; regenerating.",
+            chr, n_new
+          ))
+          # need_generate remains TRUE
+        } else {
+          # Current samples ⊆ saved samples — reindex rows (subset, safe under exchangeability)
           ko_obj <- .align_knockoff_samples(ko_obj, target_ids)
+          G_k           <- ko_obj$G_k
+          need_generate <- FALSE
         }
-        G_k           <- ko_obj$G_k
-        need_generate <- FALSE
       }
     }, error = function(e) {
       warning("Failed to load knockoff file ", knockoff_file, ": ", conditionMessage(e),

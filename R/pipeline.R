@@ -680,7 +680,7 @@ run_pipeline <- function(
     M, fdr = fdr
   )
 
-  keep_cols  <- c("chr", "start", "end", "Qvalue", "W_KS", "W_Threshold", "detect")
+  keep_cols  <- c("chr", "start", "end", "Qvalue", "W", "W_Threshold", "indicator")
   result_all <- summary_res[, keep_cols]
 
   out_file <- file.path(outdir, "Single_Window_results.csv")
@@ -775,9 +775,9 @@ run_pipeline <- function(
 
   summary_res <- GeneScan3DKnock_Summary(result.all, M = M, fdr = fdr)
 
-  keep_cols  <- c("chr", "gene_id", "gene_start", "gene_end", "Qvalue", "W", "W_Threshold", "detect")
+  keep_cols  <- c("chr", "gene_id", "gene_start", "gene_end", "Qvalue", "W", "W_Threshold", "indicator")
   result_all <- summary_res[, keep_cols]
-  data.table::setnames(result_all, old = c("gene_start","gene_end","W"), new = c("start","end","W_KS"))
+  data.table::setnames(result_all, old = c("gene_start","gene_end"), new = c("start","end"))
 
   out_file <- file.path(outdir, "GeneCentric_results.csv")
   data.table::fwrite(result_all, out_file)
@@ -836,4 +836,23 @@ run_pipeline <- function(
 
   ko_obj$sample_ids <- target_ids
   ko_obj
+}
+
+#' Check whether saved knockoffs can be reused or must be regenerated
+#'
+#' Model-X knockoffs are generated jointly for a fixed sample set.  A saved
+#' knockoff matrix can be reused only when the current sample set is a
+#' \emph{subset} of the saved set (marginal exchangeability is preserved).
+#' When the current set contains samples not present in the saved set,
+#' regeneration is required because those new samples never participated in
+#' the SCIP regression fitting.
+#'
+#' @param current_ids Numeric/character vector of sample IDs in the current run.
+#' @param saved_ids   Numeric/character vector of sample IDs stored in the RDS.
+#' @return \code{TRUE} when regeneration is required, \code{FALSE} when a
+#'   simple row-subset (align) is sufficient.
+#' @keywords internal
+.need_regenerate_samples <- function(current_ids, saved_ids) {
+  if (is.null(current_ids) || is.null(saved_ids)) return(FALSE)
+  !all(as.numeric(current_ids) %in% as.numeric(saved_ids))
 }
