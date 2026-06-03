@@ -609,7 +609,10 @@ Get.p<-function(X,result.prelim){
   mu<-result.prelim$nullglm$fitted.values;Y.res<-result.prelim$Y-mu
   outcome<-result.prelim$out_type
   if(outcome=='D'){
-    p<-ScoreTest_SPA(t(X),result.prelim$Y,result.prelim$X,method=c("fastSPA"),minmac=-Inf)$p.value
+    invisible(capture.output(
+      p <- ScoreTest_SPA(t(X), result.prelim$Y, result.prelim$X,
+                         method = c("fastSPA"), minmac = -Inf)$p.value
+    ))
   }else{
     v<-rep(as.numeric(var(Y.res)),nrow(X))
     A<-(t(X)%*%Y.res)^2

@@ -2,7 +2,7 @@ plot_manhattan <- function(result_all, out_path, title = 'Manhattan plot (W stat
   manhattan_data <- data.frame(
     CHR = result_all[,"chr"],
     BP = (result_all[,"start"] + result_all[,"end"]) %/% 2,
-    P = result_all[,"W"]
+    P = result_all[,"W statistics"]
   )
   manhattan_data$SNP <- paste0(manhattan_data$CHR, ":", manhattan_data$BP)
   # manhattan_data$P[!is.finite(manhattan_data$P)] <- 0
@@ -10,7 +10,7 @@ plot_manhattan <- function(result_all, out_path, title = 'Manhattan plot (W stat
   max_finite <- max(finite_vals, na.rm = TRUE)
   manhattan_data$P[!is.finite(manhattan_data$P)] <- max_finite
   
-  threshold <- result_all[,"W_Threshold"][1]
+  threshold <- result_all[,"threshold"][1]
   png(file.path(out_path, title), width = 1200, height = 600, res = 150) 
   manhattan(
       manhattan_data,

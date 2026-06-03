@@ -1,4 +1,4 @@
-chr,gene_id,start,end,Qvalue,W,W_Threshold,indicator
+chr,gene_id,start,end,W statistics,q-value,threshold,indicator
 1,SAMD11,860260,879955,1,0,Inf,FALSE
 1,NOC2L,879584,894689,1,0,Inf,FALSE
 1,KLHL17,895967,901095,1,0,Inf,FALSE

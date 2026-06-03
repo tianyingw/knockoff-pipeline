@@ -680,8 +680,9 @@ run_pipeline <- function(
     M, fdr = fdr
   )
 
-  keep_cols  <- c("chr", "start", "end", "Qvalue", "W", "W_Threshold", "indicator")
+  keep_cols  <- c("chr", "start", "end", "W", "Qvalue", "W_Threshold", "indicator")
   result_all <- summary_res[, keep_cols]
+  colnames(result_all) <- c("chr", "start", "end", "W statistics", "q-value", "threshold", "indicator")
 
   out_file <- file.path(outdir, "Single_Window_results.csv")
   data.table::fwrite(result_all, out_file)
@@ -775,9 +776,10 @@ run_pipeline <- function(
 
   summary_res <- GeneScan3DKnock_Summary(result.all, M = M, fdr = fdr)
 
-  keep_cols  <- c("chr", "gene_id", "gene_start", "gene_end", "Qvalue", "W", "W_Threshold", "indicator")
+  keep_cols  <- c("chr", "gene_id", "gene_start", "gene_end", "W", "Qvalue", "W_Threshold", "indicator")
   result_all <- summary_res[, keep_cols]
   data.table::setnames(result_all, old = c("gene_start","gene_end"), new = c("start","end"))
+  colnames(result_all) <- c("chr", "gene_id", "start", "end", "W statistics", "q-value", "threshold", "indicator")
 
   out_file <- file.path(outdir, "GeneCentric_results.csv")
   data.table::fwrite(result_all, out_file)

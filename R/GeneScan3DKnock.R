@@ -758,7 +758,10 @@ Get.p<-function(X,result.null.model){
    mu<-result.null.model$nullglm$fitted.values;Y.res<-result.null.model$Y-mu
    outcome<-result.null.model$out_type
    if(outcome=='D'){
-      p<-ScoreTest_SPA(t(X),result.null.model$Y,result.null.model$X,method=c("fastSPA"),minmac=-Inf)$p.value
+      invisible(capture.output(
+         p <- ScoreTest_SPA(t(X), result.null.model$Y, result.null.model$X,
+                            method = c("fastSPA"), minmac = -Inf)$p.value
+      ))
    }else{
       v<-rep(as.numeric(var(Y.res)),nrow(X))
       p<-pchisq(as.vector((t(X)%*%Y.res)^2)/(apply(X*(v*X),2,sum)-apply(t(X)%*%(v*result.null.model$X0)%*%result.null.model$inv.X0*t(t(result.null.model$X0)%*%as.matrix(v*X)),1,sum)),df=1,lower.tail=F)
