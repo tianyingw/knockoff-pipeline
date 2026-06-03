@@ -87,6 +87,7 @@ Fit_null_model_GLMM <- function(plink_file,
     outputPrefix = output_prefix,
     nThreads = n_threads,
     useSparseGRMtoFitNULL = TRUE,
+    usePCGwithSparseGRM = TRUE,       # iterative PCG solver (avoids SuperLU OOM)
     skipVarianceRatioEstimation = FALSE,
     IsOverwriteVarianceRatioFile = TRUE
   )
