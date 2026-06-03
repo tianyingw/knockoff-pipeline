@@ -1,7 +1,7 @@
 Package: KnockoffPipeline
 Title: Knockoff-Based Genomic Analysis Pipeline
 Version: 1.0.0
-Authors@R: c(
+Authors: c(
     person("Yujie", "Shen",
            email = "shenyj22@mails.tsinghua.edu.cn",
            role = "aut"),
