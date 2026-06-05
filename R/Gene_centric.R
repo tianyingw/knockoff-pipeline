@@ -182,7 +182,11 @@ run_batch_gene <- function(
         paste0("GeneScan3D.Cauchy_knockoff_", seq_len(M))
       return(results)
 
-    }, error = function(e) NULL)
+    }, error = function(e) {
+      message("  !! Gene ", genes[kk, id], " (chr ", chr, ") failed: ",
+              conditionMessage(e))
+      NULL
+    })
   }
 
   out <- parallel::mclapply(kk_vec, safe_fun, mc.cores = user_cores)
