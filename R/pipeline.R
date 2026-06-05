@@ -705,11 +705,11 @@ run_pipeline <- function(
 #' @keywords internal
 .write_batch_result <- function(mid_dir, chr, batch_size, b, result_df) {
   d <- .ensure_batch_dir(mid_dir, chr)
-  if (!is.null(result_df) && nrow(result_df) > 0L) {
-    data.table::fwrite(result_df,
-      file.path(d, sprintf("GeneCentric_batch_bs%d_b%04d.txt", batch_size, b)),
-      sep = "\t")
-  }
+  # Always write a file — even empty results serve as a completion marker,
+  # preventing infinite retry of genes that legitimately have no signal.
+  out_file <- file.path(d, sprintf("GeneCentric_batch_bs%d_b%04d.txt", batch_size, b))
+  if (is.null(result_df)) result_df <- data.table::data.table()
+  data.table::fwrite(result_df, out_file, sep = "\t")
 }
 
 #' Merge all per-batch files into the chromosome-level file
@@ -728,8 +728,20 @@ run_pipeline <- function(
     warning("No batch files found for chr ", chr)
     return(invisible(NULL))
   }
-  result_chr <- data.table::rbindlist(
-    lapply(batch_files, data.table::fread), fill = TRUE)
+
+  # Read batch files, silently skipping empty ones (completion markers)
+  batch_list <- lapply(batch_files, function(f) {
+    tryCatch(data.table::fread(f), error = function(e) NULL)
+  })
+  batch_list <- Filter(Negate(is.null), batch_list)
+  batch_list <- Filter(function(dt) nrow(dt) > 0L, batch_list)
+
+  if (length(batch_list) == 0L) {
+    message("  All batch files for chr ", chr, " are empty — no results to merge.")
+    return(invisible(NULL))
+  }
+
+  result_chr <- data.table::rbindlist(batch_list, fill = TRUE)
   if ("gene_id" %in% names(result_chr) && any(duplicated(result_chr$gene_id))) {
     n_dup <- sum(duplicated(result_chr$gene_id))
     result_chr <- result_chr[!duplicated(result_chr$gene_id), ]
@@ -957,10 +969,10 @@ run_pipeline <- function(
         read_mid_exist      = read_mid_exist
       )
 
-      # ---- Incremental save: write batch result + update progress -------
+      # ---- Incremental save: always persist batch result + progress ----
+      # Writes even when NULL (empty file = completion marker) so that
+      # genes with no detectable signal are not retried forever.
       .write_batch_result(mid_dir, c, batch_size, b, result_list_chr[[b]])
-
-      # Record gene IDs from this batch in the progress file
       batch_gene_ids <- as.character(chr_genes[batch_index[[b]], ]$id)
       .write_progress_genes(mid_dir, c, batch_gene_ids)
 
