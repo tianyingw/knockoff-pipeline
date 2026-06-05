@@ -145,7 +145,7 @@ run_batch_gene <- function(
       } else {
         full_results <- GeneScan3D.UKB.GLMM.KnockoffGeneration(
           G_gene_buffer_surround        = G_gene,
-          variants_gene_buffer_surround = variants_batch[idx_gene],
+          variants_gene_buffer_surround = variants_batch[idx_gene_surround],
           gene_buffer.pos               = gene_buffer.pos,
           R                             = R,
           G_EnhancerAll_surround        = G_EnhancerAll_surround,
