@@ -202,9 +202,7 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   # ---- Association tests ---------------------------------------------------
   tmp <- GeneScan3D.UKB.GLMM(
     G                    = G_gene_buffer,
-    Z                    = NULL, G.promoter = NULL, Z.promoter = NULL,
     G.EnhancerAll        = G_EnhancerAll,
-    Z.EnhancerAll        = NULL,
     R                    = R,
     p_Enhancer           = p_EnhancerAll_out,
     window.size          = window.size,

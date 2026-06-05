@@ -1267,7 +1267,7 @@ GeneScan3DKnock<-function(M=5,p0=GeneScan3DKnock.example$GeneScan3D.original,
    kappa=apply(T,1,which.max)-1 #max T is from original data (0) or knockoff data (1 to 5)
    tau=apply(T,1,max)-apply(T,1,function(x)median(x[-which.max(x)]))
    Rej.Bound=10000 
-   b=order(tau,decreasing=T)
+   b=order(tau, kappa, decreasing=c(T, F))
    c_0=kappa[b]==0  #only calculate q-value for kappa=0
    # print("success")
    #calculate ratios for top Rej.Bound tau values
@@ -1293,7 +1293,7 @@ GeneScan3DKnock<-function(M=5,p0=GeneScan3DKnock.example$GeneScan3D.original,
    #gene is significant if its q value less or equal than the fdr threshold; OR W>=W.threshold
    gene_sign=as.character(gene_id[which(qvalue<=fdr)])
    
-   return(list(W=W,W.threshold=W.threshold,Qvalue=qvalue,gene_sign=gene_sign))
+   return(list(W=W,W.threshold=W.threshold,Qvalue=pmin(qvalue, 1),gene_sign=gene_sign))
 }
 
 

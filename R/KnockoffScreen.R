@@ -398,8 +398,8 @@ KS_summary<-function(result.window,result.single,M,fdr=0.1){
   result<-result[order(result[,2]),]
   result<-result[order(result[,1]),]
 
-  q<-MK.q.byStat(result[,'kappa'],result[,'tau'],M=5)
-  threshold<-MK.threshold.byStat(result[,'kappa'],result[,'tau'],M=5,fdr=fdr,Rej.Bound=10000)
+  q<-MK.q.byStat(result[,'kappa'],result[,'tau'],M=M)
+  threshold<-MK.threshold.byStat(result[,'kappa'],result[,'tau'],M=M,fdr=fdr,Rej.Bound=10000)
   result.summary <- data.frame(
     result[, 1:5, drop = FALSE],  # drop=FALSE 保持数据框结构
     Qvalue = q,
@@ -654,7 +654,7 @@ MK.statistic<-function (T_0,T_k,method='median'){
 }
 
 MK.threshold.byStat<-function (kappa,tau,M,fdr = 0.1,Rej.Bound=10000){
-  b<-order(tau,decreasing=T)
+  b<-order(tau, kappa, decreasing=c(TRUE, FALSE))  # tie for tau: kappa=0 before kappa=1
   c_0<-kappa[b]==0
   ratio<-c();temp_0<-0
   for(i in 1:length(b)){
@@ -681,7 +681,7 @@ MK.threshold<-function (T_0,T_k, fdr = 0.1,method='median',Rej.Bound=10000){
 
 
 MK.q.byStat<-function (kappa,tau,M,Rej.Bound=10000){
-  b<-order(tau,decreasing=T)
+  b<-order(tau, kappa, decreasing=c(TRUE, FALSE))  # tie: kappa=0 before kappa=1
   c_0<-kappa[b]==0
   #calculate ratios for top Rej.Bound tau values
   ratio<-c();temp_0<-0
@@ -701,7 +701,7 @@ MK.q.byStat<-function (kappa,tau,M,Rej.Bound=10000){
     q[b[i]]<-min(ratio[temp.index])*c_0[i]+1-c_0[i]
     if(i>Rej.Bound){break}
   }
-  return(q)
+  return(pmin(q, 1))
 }
 
 
