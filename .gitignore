@@ -2,9 +2,12 @@
 .RData
 .Rproj.user
 
-SAIGE/src/*.o
-SAIGE/src/*.so
-SAIGE/src/*.dll
-SAIGE/src/*.dylib
-SAIGE/src/backup/*
-SAIGE/pixi.lock
+# SAIGE_new: exclude large non-source files
+SAIGE_new/extdata/input/
+SAIGE_new/extdata/output/
+SAIGE_new/plink-ng/
+SAIGE_new/src/*.o
+SAIGE_new/src/*.so
+SAIGE_new/src/*.dll
+SAIGE_new/src/SAIGE/
+SAIGE_new/plink2_includes.a

@@ -732,6 +732,22 @@ create.MK.AL_enhancer <- function(X=G_enhancer_surround,pos,enhancer_start,enhan
 
 
 
+# Robust sparse solve: try Cholesky, fall back to ridge-regularized LU
+.safe_solve_sparse <- function(A, B, ridge = 1e-4) {
+  res <- tryCatch(
+    Matrix::solve(A, B, sparse = TRUE),
+    error = function(e) NULL
+  )
+  if (!is.null(res)) return(res)
+  # Ridge fallback: A + ridge * I
+  n <- nrow(A)
+  A_ridge <- A + Matrix::Diagonal(n, ridge)
+  tryCatch(
+    Matrix::solve(A_ridge, B, sparse = TRUE),
+    error = function(e) stop("Sparse solve failed even with ridge: ", conditionMessage(e))
+  )
+}
+
 GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=length(p_EnhancerAll),
                               p_Enhancer=p_EnhancerAll,window.size=c(1000,5000,10000),pos=pos_gene_buffer,
                               MAC.threshold=10,MAF.threshold=0.01,Gsub.id=Gsub.id,
@@ -741,8 +757,8 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   mu<-as.vector(result.null.model.GLMM$fitted.values)
   Y.res<-as.vector(result.null.model.GLMM$residuals)
   X<-result.null.model.GLMM$X #covariates include intercept
-  
-  invSigma_X<-solve(sparseSigma, X, sparse=T)
+
+  invSigma_X<-.safe_solve_sparse(sparseSigma, X)
   C<-solve(t(X)%*%invSigma_X)
   #genotype filtering/checking/missing values imputation
   G_filter=Genotype_filter(G,pos,impute.method='fixed')
@@ -789,7 +805,7 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   ##GLMM
   #adjusted score statistics, without SPA
   if(outcome=='C'){
-    invSigma_G_tilde<-solve(sparseSigma, G_tilde, sparse=T)
+    invSigma_G_tilde<-.safe_solve_sparse(sparseSigma, G_tilde)
     V=t(G_tilde)%*%invSigma_G_tilde
     p.single=pchisq(S^2/(ratio*diag(V)),df=1,lower.tail=F)
   }
@@ -836,7 +852,7 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
 
     #approximation the covariance matrix for GLMM: t(G) P_S G
     #G.window=G.window-X%*%solve(t(X)%*%(v*X))%*%(t(X)%*%(v*G.window))
-    invSigma_G.window<-solve(sparseSigma, G.window, sparse=T)
+    invSigma_G.window<-.safe_solve_sparse(sparseSigma, G.window)
 
     A<-t(G.window)%*%invSigma_G.window
     B<-t(X)%*%invSigma_G.window
@@ -934,7 +950,7 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
       ##GLMM
       #adjusted score statistics, without SPA
       if(outcome=='C'){
-        invSigma_G_tilde.Enhancer<-solve(sparseSigma, G_tilde.Enhancer, sparse=T)
+        invSigma_G_tilde.Enhancer<-.safe_solve_sparse(sparseSigma, G_tilde.Enhancer)
         V.Enhancer=t(G_tilde.Enhancer)%*%invSigma_G_tilde.Enhancer
         p.single.Enhancer=pchisq(S.Enhancer^2/(ratio*diag(V.Enhancer)),df=1,lower.tail=F)
       }
@@ -957,7 +973,7 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
         #enhancer have more than 1 variant, then conduct SKAT and burden; otherwise only conduct single variant score test
         #approximation the covariance matrix for GLMM
         #t(G) P_S G
-        invSigma_G.window.Enhancer<-solve(sparseSigma, G.window.Enhancer, sparse=T)
+        invSigma_G.window.Enhancer<-.safe_solve_sparse(sparseSigma, G.window.Enhancer)
         A<-t(G.window.Enhancer)%*%invSigma_G.window.Enhancer
         B<-t(X)%*%invSigma_G.window.Enhancer
         K_S=A-t(B)%*%C%*%B
