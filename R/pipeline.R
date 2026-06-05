@@ -520,8 +520,11 @@ run_pipeline <- function(
       chr_ko_dir <- file.path(knockoff_dir, paste0("chr", c))
       if (!dir.exists(chr_ko_dir)) dir.create(chr_ko_dir)
       block_chr  <- blocks[blocks$chr == c]
+      n_blocks   <- nrow(block_chr)
+      message("  chr ", c, ": ", n_blocks, " blocks")
 
-      parallel::mclapply(seq_len(nrow(block_chr)), function(kk) {
+      parallel::mclapply(seq_len(n_blocks), function(kk) {
+        message("  Block ", kk, " / ", n_blocks)
         ko_file <- .ko_file_single(chr_ko_dir, kk)
         if (read_mid_exist && file.exists(ko_file)) return(invisible(NULL))
         run_single_block(
@@ -597,6 +600,149 @@ run_pipeline <- function(
 
 
 # =============================================================================
+# Helpers for incremental intermediate result saving
+# =============================================================================
+
+#' Ensure the per-block result directory exists for a chromosome
+#' @keywords internal
+.ensure_block_dir <- function(mid_dir, chr) {
+  d <- file.path(mid_dir, "blocks", paste0("chr", chr))
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  d
+}
+
+#' Ensure the per-batch result directory exists for a chromosome
+#' @keywords internal
+.ensure_batch_dir <- function(mid_dir, chr) {
+  d <- file.path(mid_dir, "batches", paste0("chr", chr))
+  if (!dir.exists(d)) dir.create(d, recursive = TRUE)
+  d
+}
+
+#' Path to the Gene_Centric progress file for a chromosome
+#' @keywords internal
+.progress_file <- function(mid_dir, chr) {
+  file.path(mid_dir, paste0("progress_chr", chr, ".txt"))
+}
+
+#' Get block indices that already have per-block result files
+#' @param mid_dir Character. Mid-results directory.
+#' @param chr     Integer. Chromosome number.
+#' @param prefix  Character. "Single" or "Window".
+#' @return Integer vector of completed block indices (possibly empty).
+#' @keywords internal
+.get_completed_blocks <- function(mid_dir, chr, prefix) {
+  d <- file.path(mid_dir, "blocks", paste0("chr", chr))
+  if (!dir.exists(d)) return(integer(0))
+  pattern <- paste0("^", prefix, "_block_(\\d+)\\.txt$")
+  files <- list.files(d, pattern = pattern)
+  if (length(files) == 0) return(integer(0))
+  as.integer(gsub(paste0(prefix, "_block_|\\.txt"), "", files))
+}
+
+#' Write per-block results to disk (safe for use inside mclapply workers)
+#' @keywords internal
+.write_block_result <- function(mid_dir, chr, kk, single_df, window_df) {
+  d <- .ensure_block_dir(mid_dir, chr)
+  if (!is.null(single_df) && nrow(single_df) > 0L) {
+    data.table::fwrite(single_df,
+      file.path(d, sprintf("Single_block_%04d.txt", kk)), sep = "\t")
+  }
+  if (!is.null(window_df) && nrow(window_df) > 0L) {
+    data.table::fwrite(window_df,
+      file.path(d, sprintf("Window_block_%04d.txt", kk)), sep = "\t")
+  }
+}
+
+#' Merge per-block files into chromosome-level files (backward compat)
+#' @keywords internal
+.merge_per_block_files <- function(mid_dir, chr) {
+  d <- file.path(mid_dir, "blocks", paste0("chr", chr))
+  single_files <- list.files(d, pattern = "^Single_block_\\d+\\.txt$",
+                             full.names = TRUE)
+  window_files <- list.files(d, pattern = "^Window_block_\\d+\\.txt$",
+                             full.names = TRUE)
+
+  if (length(single_files) > 0L) {
+    single_chr <- data.table::rbindlist(
+      lapply(single_files, data.table::fread), fill = TRUE)
+    data.table::fwrite(single_chr,
+      file.path(mid_dir, paste0("Single_mid_results_chr", chr, ".txt")),
+      sep = "\t")
+    message("  Merged ", length(single_files),
+            " per-block Single files for chr ", chr)
+  }
+  if (length(window_files) > 0L) {
+    window_chr <- data.table::rbindlist(
+      lapply(window_files, data.table::fread), fill = TRUE)
+    data.table::fwrite(window_chr,
+      file.path(mid_dir, paste0("Window_mid_results_chr", chr, ".txt")),
+      sep = "\t")
+    message("  Merged ", length(window_files),
+            " per-block Window files for chr ", chr)
+  }
+}
+
+#' Read completed gene IDs from the progress file
+#' @return Character vector of gene IDs (empty if no progress file).
+#' @keywords internal
+.read_progress_genes <- function(mid_dir, chr) {
+  f <- .progress_file(mid_dir, chr)
+  if (!file.exists(f)) return(character(0))
+  g <- readLines(f, warn = FALSE)
+  g[nzchar(g)]
+}
+
+#' Append gene IDs to the progress file (one per line)
+#' @keywords internal
+.write_progress_genes <- function(mid_dir, chr, gene_ids) {
+  f <- .progress_file(mid_dir, chr)
+  cat(paste0(gene_ids, collapse = "\n"), "\n",
+      file = f, append = TRUE, sep = "")
+}
+
+#' Write per-batch result file for Gene_Centric
+#' @keywords internal
+.write_batch_result <- function(mid_dir, chr, batch_size, b, result_df) {
+  d <- .ensure_batch_dir(mid_dir, chr)
+  if (!is.null(result_df) && nrow(result_df) > 0L) {
+    data.table::fwrite(result_df,
+      file.path(d, sprintf("GeneCentric_batch_bs%d_b%04d.txt", batch_size, b)),
+      sep = "\t")
+  }
+}
+
+#' Merge all per-batch files into the chromosome-level file
+#'
+#' De-duplicates by gene_id to handle batch_size changes across runs.
+#' @keywords internal
+.merge_batch_files <- function(mid_dir, chr) {
+  d <- file.path(mid_dir, "batches", paste0("chr", chr))
+  if (!dir.exists(d)) {
+    warning("No batch directory found for chr ", chr, " — cannot merge.")
+    return(invisible(NULL))
+  }
+  batch_files <- list.files(d, pattern = "^GeneCentric_batch_bs.*\\.txt$",
+                            full.names = TRUE)
+  if (length(batch_files) == 0L) {
+    warning("No batch files found for chr ", chr)
+    return(invisible(NULL))
+  }
+  result_chr <- data.table::rbindlist(
+    lapply(batch_files, data.table::fread), fill = TRUE)
+  if ("gene_id" %in% names(result_chr) && any(duplicated(result_chr$gene_id))) {
+    n_dup <- sum(duplicated(result_chr$gene_id))
+    result_chr <- result_chr[!duplicated(result_chr$gene_id), ]
+    message("  Removed ", n_dup, " duplicate gene entries during batch merge")
+  }
+  data.table::fwrite(result_chr,
+    file.path(mid_dir, paste0("GeneCentric_mid_results_chr", chr, ".txt")),
+    sep = "\t")
+  message("  Merged ", length(batch_files), " per-batch files for chr ", chr)
+}
+
+
+# =============================================================================
 # Internal: Single_Window analysis for one phenotype
 # =============================================================================
 
@@ -619,16 +765,42 @@ run_pipeline <- function(
     single_mid_file <- file.path(mid_dir, paste0("Single_mid_results_chr", c, ".txt"))
     window_mid_file <- file.path(mid_dir, paste0("Window_mid_results_chr", c, ".txt"))
 
+    # Backward compat: skip if chromosome-level files already exist
     if (read_mid_exist && file.exists(single_mid_file) && file.exists(window_mid_file)) {
       message("  Existing intermediate files found — skipping chr ", c); next
     }
 
     block_chr  <- blocks[blocks$chr == c]
+    n_blocks   <- nrow(block_chr)
     chr_ko_dir <- file.path(knockoff_dir, paste0("chr", c))
+    message("  chr ", c, ": ", n_blocks, " blocks")
 
-    out <- parallel::mclapply(seq_len(nrow(block_chr)), function(kk) {
-      tryCatch(
-        run_single_block(
+    # ---- Determine pending blocks from per-block progress -----------------
+    if (read_mid_exist) {
+      completed_single <- .get_completed_blocks(mid_dir, c, "Single")
+      completed_window <- .get_completed_blocks(mid_dir, c, "Window")
+      completed_blocks <- intersect(completed_single, completed_window)
+    } else {
+      completed_blocks <- integer(0)
+    }
+    pending_blocks <- setdiff(seq_len(n_blocks), completed_blocks)
+
+    if (length(pending_blocks) == 0L) {
+      message("  All blocks already completed for chr ", c)
+      .merge_per_block_files(mid_dir, c)
+      next
+    }
+
+    message("  Processing ", length(pending_blocks), " pending block(s) of ",
+            n_blocks, " total")
+
+    # Ensure block directory exists BEFORE parallel fork (avoids race)
+    .ensure_block_dir(mid_dir, c)
+
+    out <- parallel::mclapply(pending_blocks, function(kk) {
+      message("  Block ", kk, " / ", n_blocks)
+      tryCatch({
+        res <- run_single_block(
           blocks                  = block_chr,
           kk                      = kk,
           geno.file               = geno_file,
@@ -643,19 +815,25 @@ run_pipeline <- function(
           knockoff_file           = .ko_file_single(chr_ko_dir, kk),
           knockoff_sample_ids     = knockoff_sample_ids,
           stage1_only             = FALSE
-        ),
-        error = function(e) { warning("Block ", kk, " chr ", c, " failed: ", conditionMessage(e)); NULL }
-      )
+        )
+        # Write per-block results IMMEDIATELY (different file per block = safe)
+        if (!is.null(res)) {
+          .write_block_result(mid_dir, c, kk,
+            data.table::as.data.table(res$result.single),
+            data.table::as.data.table(res$result.window))
+        }
+        res
+      }, error = function(e) {
+        warning("Block ", kk, " chr ", c, " failed: ", conditionMessage(e)); NULL
+      })
     }, mc.cores = user_cores)
 
     out <- Filter(Negate(is.null), out)
     if (length(out) == 0L) { warning("All blocks failed for chr ", c, " — skipping."); next }
 
-    single_chr <- data.table::rbindlist(lapply(out, function(x) data.table::as.data.table(x$result.single)), fill = TRUE)
-    window_chr <- data.table::rbindlist(lapply(out, function(x) data.table::as.data.table(x$result.window)), fill = TRUE)
-    data.table::fwrite(single_chr, single_mid_file, sep = "\t")
-    data.table::fwrite(window_chr, window_mid_file, sep = "\t")
-    rm(out, single_chr, window_chr); gc()
+    # Merge per-block files into chromosome-level files (backward compat)
+    .merge_per_block_files(mid_dir, c)
+    rm(out); gc()
   }
 
   # ---- Merge and summarise -------------------------------------------------
@@ -716,6 +894,7 @@ run_pipeline <- function(
     message("--- chr ", c, " (Gene_Centric) ---")
     mid_file_chr <- file.path(mid_dir, paste0("GeneCentric_mid_results_chr", c, ".txt"))
 
+    # Backward compat: skip if chromosome-level file already exists
     if (read_mid_exist && file.exists(mid_file_chr)) {
       message("  Existing intermediate file found — skipping chr ", c); next
     }
@@ -726,8 +905,31 @@ run_pipeline <- function(
     abc_df     <- data.table::fread(.extdata_path(genome_build, paste0("ABC_combined_chr", c, ".csv")))
     gh_df      <- data.table::fread(.extdata_path(genome_build, paste0("GH.data_chr",      c, ".csv")))
 
-    batch_index     <- split(seq_len(nrow(chr_genes)), ceiling(seq_len(nrow(chr_genes)) / batch_size))
+    # ---- Read progress file: filter out already-completed genes ----------
+    if (read_mid_exist) {
+      completed_genes <- .read_progress_genes(mid_dir, c)
+      if (length(completed_genes) > 0L) {
+        n_before  <- nrow(chr_genes)
+        chr_genes <- chr_genes[!chr_genes$id %in% completed_genes, ]
+        message("  ", n_before - nrow(chr_genes), " gene(s) already completed, ",
+                nrow(chr_genes), " remaining")
+      }
+    }
+
+    # All genes done — just ensure chromosome-level file is in place
+    if (nrow(chr_genes) == 0L) {
+      message("  All genes already completed for chr ", c)
+      .merge_batch_files(mid_dir, c)
+      next
+    }
+
+    # Re-batch remaining genes
+    batch_index     <- split(seq_len(nrow(chr_genes)),
+                             ceiling(seq_len(nrow(chr_genes)) / batch_size))
     result_list_chr <- vector("list", length(batch_index))
+
+    # Ensure batch directory exists
+    .ensure_batch_dir(mid_dir, c)
 
     for (b in seq_along(batch_index)) {
 
@@ -754,12 +956,20 @@ run_pipeline <- function(
         stage1_only         = FALSE,
         read_mid_exist      = read_mid_exist
       )
+
+      # ---- Incremental save: write batch result + update progress -------
+      .write_batch_result(mid_dir, c, batch_size, b, result_list_chr[[b]])
+
+      # Record gene IDs from this batch in the progress file
+      batch_gene_ids <- as.character(chr_genes[batch_index[[b]], ]$id)
+      .write_progress_genes(mid_dir, c, batch_gene_ids)
+
       gc()
     }
 
-    result_chr <- data.table::rbindlist(Filter(Negate(is.null), result_list_chr), fill = TRUE)
-    data.table::fwrite(result_chr, mid_file_chr, sep = "\t")
-    rm(result_list_chr, result_chr); gc()
+    # Merge per-batch files into chromosome-level file (backward compat)
+    .merge_batch_files(mid_dir, c)
+    rm(result_list_chr); gc()
   }
 
   # ---- Merge and summarise -------------------------------------------------

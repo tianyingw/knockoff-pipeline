@@ -100,8 +100,13 @@ Fit_null_model_GLMM <- function(plink_file,
     saige_args$qCovarCol <- as.character(cat_covar_cols)
   }
   # 创建输出目录
-  if (dir.exists(output_prefix)) {
-    unlink(output_prefix, recursive = TRUE, force = TRUE)
+  # If user supplies a GRM, do NOT delete the output directory — the GRM may
+  # be inside it.  If no GRM is supplied, clean up any stale SAIGE output so
+  # that createSparseGRM starts from a clean state.
+  if (is.null(sparse_grm_file)) {
+    if (dir.exists(output_prefix)) {
+      unlink(output_prefix, recursive = TRUE, force = TRUE)
+    }
   }
   dir.create(output_prefix, recursive = TRUE, showWarnings = FALSE)
 
@@ -162,6 +167,14 @@ Fit_null_model_GLMM <- function(plink_file,
     saige_args$sparseGRMSampleIDFile <- paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx.sampleIDs.txt")
   }
 
+  # Validate that GRM exists (either user-supplied or auto-generated)
+  if (!is.null(saige_args$sparseGRMFile)) {
+    if (!file.exists(saige_args$sparseGRMFile)) {
+      stop("Sparse GRM file not found: ", saige_args$sparseGRMFile)
+    }
+    message("Using sparse GRM: ", saige_args$sparseGRMFile)
+  }
+
   sparse_grm_check <- Matrix::readMM(saige_args$sparseGRMFile)
   diag_entries <- sum(Matrix::diag(sparse_grm_check) != 0)
   off_diag_nnz <- Matrix::nnzero(sparse_grm_check) - diag_entries
@@ -177,18 +190,18 @@ Fit_null_model_GLMM <- function(plink_file,
   rda_file <- paste0(output_prefix, ".rda")
   do.call(fitNULLGLMM, saige_args)
   load(rda_file)
- 
+
   ratio <- as.matrix(read.table(paste0(output_prefix,".varianceRatio.txt")))[1,1]
   if (length(sample_id_col) == 0){
     modglmm$sampleID = 1:length(modglmm$sampleID)
   }else{
     modglmm$sampleID = fread(pheno_file)[[sample_id_col]]
   }
-  
+
   modglmm$traitType <- ifelse(modglmm$traitType == "binary", 'D', 'C')
   results <- list(
       result.null.model.GLMM = modglmm,
-      sparseSigma = readMM(paste0(grm_prefix, "_relatednessCutoff_", relatedness_cutoff, "_", as.integer(num_random_marker_for_sparse_kin), "_randomMarkersUsed.sparseGRM.mtx")),
+      sparseSigma = sparse_grm_check,   # reuse the GRM already loaded at validation step
       ratio = as.numeric(ratio))
   return(results)
 }
