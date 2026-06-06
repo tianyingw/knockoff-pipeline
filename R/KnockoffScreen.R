@@ -191,6 +191,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       p.A<-p.KS;p.A_k<-p.KS_k
       #Knockoff statistics
       W<-(-log10(p.A)-apply(-log10(p.A_k),1,median))*(-log10(p.A)>=apply(-log10(p.A_k),1,max))
+      W[is.na(W)]<-0
       MK.stat<-MK.statistic(-log10(p.A),-log10(p.A_k),method='median')
 
       temp.summary.window<-cbind(chr,window.summary,
