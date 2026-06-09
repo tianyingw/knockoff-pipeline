@@ -759,7 +759,9 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   X<-result.null.model.GLMM$X #covariates include intercept
 
   invSigma_X<-.safe_solve_sparse(sparseSigma, X)
-  C<-solve(t(X)%*%invSigma_X)
+  C_mat <- t(X) %*% invSigma_X
+  C <- tryCatch(solve(C_mat),
+    error = function(e) solve(C_mat + diag(1e-4, nrow(C_mat))))
   #genotype filtering/checking/missing values imputation
   G_filter=Genotype_filter(G,pos,impute.method='fixed')
   G=G_filter$G

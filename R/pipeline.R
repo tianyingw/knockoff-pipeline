@@ -572,7 +572,8 @@ run_pipeline <- function(
         message("  Batch ", b, " / ", length(batch_index))
         run_batch_gene(
           genes               = chr_genes,
-          kk_vec              = batch_index[[b]],
+          b                   = b,
+          batch_index         = batch_index,
           geno.file           = geno_file,
           obj_nullmodel       = NULL,
           window_length       = sliding_window_length,
@@ -631,13 +632,12 @@ run_pipeline <- function(
 #' @param prefix  Character. "Single" or "Window".
 #' @return Integer vector of completed block indices (possibly empty).
 #' @keywords internal
-.get_completed_blocks <- function(mid_dir, chr, prefix) {
+.get_completed_blocks <- function(mid_dir, chr) {
   d <- file.path(mid_dir, "blocks", paste0("chr", chr))
   if (!dir.exists(d)) return(integer(0))
-  pattern <- paste0("^", prefix, "_block_(\\d+)\\.txt$")
-  files <- list.files(d, pattern = pattern)
+  files <- list.files(d, pattern = "^done_(\\d+)\\.txt$")
   if (length(files) == 0) return(integer(0))
-  as.integer(gsub(paste0(prefix, "_block_|\\.txt"), "", files))
+  as.integer(gsub("^done_|\\.txt$", "", files))
 }
 
 #' Write per-block results to disk (safe for use inside mclapply workers)
@@ -652,6 +652,15 @@ run_pipeline <- function(
     data.table::fwrite(window_df,
       file.path(d, sprintf("Window_block_%04d.txt", kk)), sep = "\t")
   }
+  # Always write progress marker (even for empty blocks)
+  .mark_block_done(mid_dir, chr, kk)
+}
+
+#' Write a progress marker for a completed block
+#' @keywords internal
+.mark_block_done <- function(mid_dir, chr, kk) {
+  d <- .ensure_block_dir(mid_dir, chr)
+  writeLines(as.character(kk), file.path(d, sprintf("done_%04d.txt", kk)))
 }
 
 #' Merge per-block files into chromosome-level files (backward compat)
@@ -703,12 +712,10 @@ run_pipeline <- function(
 
 #' Write per-batch result file for Gene_Centric
 #' @keywords internal
-.write_batch_result <- function(mid_dir, chr, batch_size, b, result_df) {
+.write_batch_result <- function(mid_dir, chr, run_tag, b, result_df) {
   d <- .ensure_batch_dir(mid_dir, chr)
-  # Always write a file — even empty results serve as a completion marker,
-  # preventing infinite retry of genes that legitimately have no signal.
-  out_file <- file.path(d, sprintf("GeneCentric_batch_bs%d_b%04d.txt", batch_size, b))
-  if (is.null(result_df)) result_df <- data.table::data.table()
+  out_file <- file.path(d,
+    sprintf("GeneCentric_batch_%s_b%04d.txt", run_tag, b))
   data.table::fwrite(result_df, out_file, sep = "\t")
 }
 
@@ -722,26 +729,15 @@ run_pipeline <- function(
     warning("No batch directory found for chr ", chr, " — cannot merge.")
     return(invisible(NULL))
   }
-  batch_files <- list.files(d, pattern = "^GeneCentric_batch_bs.*\\.txt$",
+  batch_files <- list.files(d, pattern = "^GeneCentric_batch_.*_b\\d+\\.txt$",
                             full.names = TRUE)
   if (length(batch_files) == 0L) {
     warning("No batch files found for chr ", chr)
     return(invisible(NULL))
   }
 
-  # Read batch files, silently skipping empty ones (completion markers)
-  batch_list <- lapply(batch_files, function(f) {
-    tryCatch(data.table::fread(f), error = function(e) NULL)
-  })
-  batch_list <- Filter(Negate(is.null), batch_list)
-  batch_list <- Filter(function(dt) nrow(dt) > 0L, batch_list)
-
-  if (length(batch_list) == 0L) {
-    message("  All batch files for chr ", chr, " are empty — no results to merge.")
-    return(invisible(NULL))
-  }
-
-  result_chr <- data.table::rbindlist(batch_list, fill = TRUE)
+  result_chr <- data.table::rbindlist(
+    lapply(batch_files, data.table::fread), fill = TRUE)
   if ("gene_id" %in% names(result_chr) && any(duplicated(result_chr$gene_id))) {
     n_dup <- sum(duplicated(result_chr$gene_id))
     result_chr <- result_chr[!duplicated(result_chr$gene_id), ]
@@ -789,9 +785,7 @@ run_pipeline <- function(
 
     # ---- Determine pending blocks from per-block progress -----------------
     if (read_mid_exist) {
-      completed_single <- .get_completed_blocks(mid_dir, c, "Single")
-      completed_window <- .get_completed_blocks(mid_dir, c, "Window")
-      completed_blocks <- intersect(completed_single, completed_window)
+      completed_blocks <- .get_completed_blocks(mid_dir, c)
     } else {
       completed_blocks <- integer(0)
     }
@@ -938,14 +932,14 @@ run_pipeline <- function(
     # Re-batch remaining genes
     batch_index     <- split(seq_len(nrow(chr_genes)),
                              ceiling(seq_len(nrow(chr_genes)) / batch_size))
-    result_list_chr <- vector("list", length(batch_index))
+    run_tag         <- format(Sys.time(), "%Y%m%d_%H%M%S")
 
     # Ensure batch directory exists
     .ensure_batch_dir(mid_dir, c)
 
     for (b in seq_along(batch_index)) {
 
-      result_list_chr[[b]] <- run_batch_gene(
+      batch_res <- run_batch_gene(
         genes               = chr_genes,
         b                   = b,
         batch_index         = batch_index,
@@ -969,10 +963,11 @@ run_pipeline <- function(
         read_mid_exist      = read_mid_exist
       )
 
-      # ---- Incremental save: always persist batch result + progress ----
-      # Writes even when NULL (empty file = completion marker) so that
-      # genes with no detectable signal are not retried forever.
-      .write_batch_result(mid_dir, c, batch_size, b, result_list_chr[[b]])
+      # ---- Incremental save: result file + progress record -------------
+      if (!is.null(batch_res) && nrow(batch_res) > 0L) {
+        .write_batch_result(mid_dir, c, run_tag, b, batch_res)
+      }
+      # Always record gene-level progress (prevents retry of empty genes)
       batch_gene_ids <- as.character(chr_genes[batch_index[[b]], ]$id)
       .write_progress_genes(mid_dir, c, batch_gene_ids)
 
@@ -981,7 +976,6 @@ run_pipeline <- function(
 
     # Merge per-batch files into chromosome-level file (backward compat)
     .merge_batch_files(mid_dir, c)
-    rm(result_list_chr); gc()
   }
 
   # ---- Merge and summarise -------------------------------------------------
