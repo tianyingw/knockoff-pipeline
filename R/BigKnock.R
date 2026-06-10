@@ -199,6 +199,27 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     }
   }
 
+  # ---- Precompute shared matrices (same X, v, sparseSigma for all genes) --
+  X_pre  <- result.null.model$X
+  mu_pre <- as.vector(result.null.model$fitted.values)
+  invSigma_X_pre <- .safe_solve_sparse(sparseSigma, X_pre)
+  C_mat_pre <- t(X_pre) %*% invSigma_X_pre
+  C_pre <- tryCatch({
+    s <- svd(C_mat_pre)
+    keep <- s$d > 1e-10 * s$d[1]
+    s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
+  }, error = function(e) solve(C_mat_pre + diag(1e-2, nrow(C_mat_pre))))
+
+  outcome_pre <- result.null.model$traitType
+  v_pre <- if (outcome_pre == 'D') as.numeric(mu_pre * (1 - mu_pre))
+           else 1 / result.null.model$theta[1]
+  vX_mat_pre <- t(X_pre) %*% (v_pre * X_pre)
+  inv_vX_pre <- tryCatch({
+    s <- svd(vX_mat_pre)
+    keep <- s$d > 1e-10 * s$d[1]
+    s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
+  }, error = function(e) solve(vX_mat_pre + diag(1e-2, nrow(vX_mat_pre))))
+
   # ---- Association tests ---------------------------------------------------
   tmp <- GeneScan3D.UKB.GLMM(
     G                    = G_gene_buffer,
@@ -211,9 +232,11 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     MAF.threshold        = MAF.threshold,
     Gsub.id              = Gsub.id[match.index],
     result.null.model.GLMM = result.null.model,
-    outcome              = result.null.model$traitType,
+    outcome              = outcome_pre,
     sparseSigma          = sparseSigma,
-    ratio                = ratio
+    ratio                = ratio,
+    C_precomputed        = C_pre,
+    inv_vX_precomputed   = inv_vX_pre
   )$GeneScan3D.Cauchy.pvalue
   GeneScan3D.Cauchy <- tmp
 
@@ -233,9 +256,11 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
         MAF.threshold        = MAF.threshold,
         Gsub.id              = Gsub.id[match.index],
         result.null.model.GLMM = result.null.model,
-        outcome              = result.null.model$traitType,
+        outcome              = outcome_pre,
         sparseSigma          = sparseSigma,
-        ratio                = ratio
+        ratio                = ratio,
+        C_precomputed        = C_pre,
+        inv_vX_precomputed   = inv_vX_pre
       )$GeneScan3D.Cauchy.pvalue
     ))
     GeneScan3D.Cauchy_knockoff[k, ] <- tmp
@@ -752,20 +777,36 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
                               p_Enhancer=p_EnhancerAll,window.size=c(1000,5000,10000),pos=pos_gene_buffer,
                               MAC.threshold=10,MAF.threshold=0.01,Gsub.id=Gsub.id,
                               result.null.model.GLMM=result.null.model.GLMM,outcome='C',
-                              sparseSigma=sparseSigma,ratio=ratio){
+                              sparseSigma=sparseSigma,ratio=ratio,
+                              C_precomputed=NULL, inv_vX_precomputed=NULL){
   #load preliminary features
   mu<-as.vector(result.null.model.GLMM$fitted.values)
   Y.res<-as.vector(result.null.model.GLMM$residuals)
   X<-result.null.model.GLMM$X #covariates include intercept
 
-  invSigma_X<-.safe_solve_sparse(sparseSigma, X)
-  C_mat <- t(X) %*% invSigma_X
-  C <- tryCatch(solve(C_mat),
-    error = function(e) solve(C_mat + diag(1e-4, nrow(C_mat))))
+  # Use precomputed matrices if provided (avoid repeated SVD)
+  if (!is.null(C_precomputed)) {
+    C <- C_precomputed
+  } else {
+    invSigma_X_temp <- .safe_solve_sparse(sparseSigma, X)
+    C_mat <- t(X) %*% invSigma_X_temp
+    C <- tryCatch({
+      s <- svd(C_mat)
+      keep <- s$d > 1e-10 * s$d[1]
+      s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
+    }, error = function(e) {
+      message("  [BigKnock] C_mat SVD failed, using ridge fallback")
+      solve(C_mat + diag(1e-2, nrow(C_mat)))
+    })
+  }
   #genotype filtering/checking/missing values imputation
-  G_filter=Genotype_filter(G,pos,impute.method='fixed')
-  G=G_filter$G
-  pos=G_filter$pos
+  G_filter <- tryCatch(
+    Genotype_filter(G, pos, impute.method = 'fixed'),
+    error = function(e) NULL
+  )
+  if (is.null(G_filter) || ncol(G_filter$G) <= 1L) return(NULL)
+  G   <- G_filter$G
+  pos <- G_filter$pos
 
   #match phenotype id (phecode) and genotype id
   if(length(Gsub.id)==0){match.index<-match(as.numeric(result.null.model.GLMM$sampleID),1:nrow(G))}else{
@@ -797,8 +838,25 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   if(outcome=='D'){v=as.numeric((mu*(1-mu)))}
   if(outcome=='C'){v=1/result.null.model.GLMM$theta[1]} #phi is residual variance
 
+  # pseudoinverse of t(X) %*% (v*X) (use precomputed if provided)
+  if (!is.null(inv_vX_precomputed)) {
+    inv_vX <- inv_vX_precomputed
+    message("  [BigKnock] using precomputed inv_vX")
+  } else {
+    message("  [BigKnock] computing inv_vX (no precomputed)")
+    vX_mat <- t(X) %*% (v * X)
+    inv_vX <- tryCatch({
+      s <- svd(vX_mat)
+      keep <- s$d > 1e-10 * s$d[1]
+      s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
+    }, error = function(e) {
+      message("  [BigKnock] SVD solve failed, using ridge fallback")
+      solve(vX_mat + diag(1e-2, nrow(vX_mat)))
+    })
+  }
+
   #covariate adjusted genotypes
-  G_tilde=G-X%*%solve(t(X)%*%(v*X))%*%(t(X)%*%(v*G))
+  G_tilde=G-X%*%inv_vX%*%(t(X)%*%(v*G))
 
   #variance-adjusted score statistics
   #as.vector(t(G_tilde)%*%Y.res)==as.vector(t(G)%*%Y.res)
@@ -945,7 +1003,7 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
       weight.matrix<-Matrix(weight.matrix)
 
       #Single variant score test for all variants in the enhancer
-      G_tilde.Enhancer=G.window.Enhancer-X%*%solve(t(X)%*%(v*X))%*%(t(X)%*%(v*G.window.Enhancer))
+      G_tilde.Enhancer=G.window.Enhancer-X%*%inv_vX%*%(t(X)%*%(v*G.window.Enhancer))
 
       S.Enhancer=as.vector(t(G_tilde.Enhancer)%*%Y.res)/result.null.model.GLMM$theta[1]
 

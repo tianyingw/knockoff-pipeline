@@ -72,13 +72,12 @@ devtools::install_github("tianyingw/knockoff-pipeline")
 
 ## Runnable Examples (Quick Start)
 
-The runnable demo data and scripts are provided under `inst/examples/`.
+The runnable demo data and scripts are provided under `inst/examples/`. The demo uses a small set of unrelated samples; the GLMM / related-sample path (`sample_uncorrelated = FALSE`) requires a GRM and substantially more markers than the demo provides to avoid near-singular solves, and is not covered by these examples.
 
 | Script             | Description                                      |
 |--------------------|--------------------------------------------------|
 | `SNP_Window.R`     | SNP/window-level analysis, unrelated samples     |
 | `Gene_unrelated.R` | Gene-centric analysis, unrelated samples         |
-| `Gene_related.R`   | Gene-centric analysis, related samples (BIGKnock) |
 
 Run an example from the package root:
 
@@ -246,7 +245,13 @@ The pipeline supports automatic restart from intermediate results. Set:
 read_mid_exist = TRUE   # (default)
 ```
 
-The pipeline will detect existing per-chromosome intermediate files and skip completed chromosomes.
+**Single_Window**: After each LD block completes, its results are written to `<mid_dir>/blocks/chr<N>/Single_block_XXXX.txt` and `Window_block_XXXX.txt`. A progress marker `<mid_dir>/blocks/chr<N>/done_XXXX.txt` is also written. On restart, blocks with existing `done_*` markers are skipped. When all blocks for a chromosome finish, they are merged into the per-chromosome file.
+
+**Gene_Centric**: After each gene batch completes, results are written to `<mid_dir>/batches/chr<N>/GeneCentric_batch_<timestamp>_bXXXX.txt`. Completed gene IDs are appended to `<mid_dir>/progress_chr<N>.txt`. On restart, genes already recorded in the progress file are removed from the queue, and the remaining genes are re-batched — naturally handling `batch_size` changes between runs.
+
+**Backward compatibility**: If per-chromosome intermediate files (`*_mid_results_chr*.txt`) already exist, the pipeline skips the chromosome entirely without inspecting per-block or per-batch files. Set `read_mid_exist = FALSE` to ignore all existing intermediate files and re-run from scratch.
+
+**Knockoff files**: Each knockoff is an independent `.rds` file; completed knockoffs are automatically skipped on restart regardless of `read_mid_exist`.
 
 ---
 
@@ -260,8 +265,11 @@ Use `<analysis_outdir>` below for the directory that receives one analysis resul
 |---------------------------------------|----------------------------------|
 | `<analysis_outdir>/Single_Window_results.csv`  | Full results table               |
 | `<analysis_outdir>/manhattan_plot_single.png`  | Manhattan / Q–Q plot             |
-| `<analysis_outdir>/mid/Single_mid_results_chr*.txt` | Per-chromosome intermediate SNP  |
-| `<analysis_outdir>/mid/Window_mid_results_chr*.txt` | Per-chromosome intermediate window |
+| `<analysis_outdir>/mid/Single_mid_results_chr*.txt` | Per-chromosome merged single-SNP results |
+| `<analysis_outdir>/mid/Window_mid_results_chr*.txt` | Per-chromosome merged window results |
+| `<analysis_outdir>/mid/blocks/chr<N>/Single_block_*.txt` | Per-block single-SNP results (incremental) |
+| `<analysis_outdir>/mid/blocks/chr<N>/Window_block_*.txt` | Per-block window results (incremental) |
+| `<analysis_outdir>/mid/blocks/chr<N>/done_*.txt` | Per-block progress markers |
 
 ### Gene_Centric
 
@@ -269,7 +277,9 @@ Use `<analysis_outdir>` below for the directory that receives one analysis resul
 |---------------------------------------|----------------------------------|
 | `<analysis_outdir>/GeneCentric_results.csv`    | Full results table               |
 | `<analysis_outdir>/manhattan_plot_gene.png`    | Manhattan / Q–Q plot             |
-| `<analysis_outdir>/mid/GeneCentric_mid_results_chr*.txt` | Per-chromosome intermediate      |
+| `<analysis_outdir>/mid/GeneCentric_mid_results_chr*.txt` | Per-chromosome merged results |
+| `<analysis_outdir>/mid/batches/chr<N>/GeneCentric_batch_*_b*.txt` | Per-batch results (incremental) |
+| `<analysis_outdir>/mid/progress_chr<N>.txt` | Completed gene IDs (checkpoint) |
 
 ### Knockoffs (when retained, or during internal multi-phenotype reuse)
 

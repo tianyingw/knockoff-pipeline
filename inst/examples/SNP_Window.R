@@ -1,6 +1,6 @@
 library(KnockoffPipeline)
 
-example_outdir <- Sys.getenv("KNOCKOFF_OUTDIR", unset = "inst/examples/output")
+example_outdir <- Sys.getenv("KNOCKOFF_OUTDIR", unset = "inst/examples/output/SNP_Window")
 plink_bin <- Sys.getenv("PLINK_BIN", unset = "plink2")
 example_cores <- as.integer(Sys.getenv("KNOCKOFF_CORES", unset = "1"))
 
