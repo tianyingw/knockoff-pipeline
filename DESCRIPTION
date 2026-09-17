@@ -8,11 +8,11 @@ Authors@R: c(
            comment = c(ORCID = "0000-0003-3187-3894")),
     person("Tianying", "Wang",
            email = "Tianying.Wang@colostate.edu",
-           role = "cre",
+           role = c("aut", "cre"),
            comment = c(ORCID = "0000-0002-2826-5364")),
     person("Shiyang", "Ma",
            email = "mashiyang1991@sjtu.edu.cn",
-           role = "cre",
+           role = "aut",
            comment = c(ORCID = "0000-0002-4423-5798"))
     )
 Description: 
