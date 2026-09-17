@@ -1,6 +1,8 @@
 .Rhistory
 .RData
 .Rproj.user
+*.Rcheck/
+*.tar.gz
 
 # SAIGE_new: exclude large non-source files
 SAIGE_new/extdata/input/

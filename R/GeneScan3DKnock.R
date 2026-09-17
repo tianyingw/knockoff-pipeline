@@ -973,6 +973,10 @@ GeneScan3D.KnockoffGeneration <- function(
   Gsub.id                       = NULL,
   result.null.model             = NULL,
   M                             = 5,
+  variant_metadata_gene_buffer_surround = NULL,
+  genome_build                  = NULL,
+  reference_id                  = NULL,
+  knockoff_seed                 = NULL,
   save_knockoff                 = FALSE,
   load_knockoff                 = FALSE,
   knockoff_file                 = NULL,
@@ -980,6 +984,11 @@ GeneScan3D.KnockoffGeneration <- function(
   stage1_only                   = FALSE
 ) {
   impute.method <- "fixed"
+
+  if (is.null(variant_metadata_gene_buffer_surround) ||
+      nrow(variant_metadata_gene_buffer_surround) != ncol(G_gene_buffer_surround)) {
+    stop("Variant metadata from the matching PLINK .bim rows must be supplied for every gene-surround column.")
+  }
 
   # ---- Sample matching (supports NULL null model for stage1) ---------------
   if (is.null(result.null.model)) {
@@ -1024,8 +1033,9 @@ GeneScan3D.KnockoffGeneration <- function(
     G_gene_buffer_surround <- Impute(G_gene_buffer_surround, impute.method)
   }
   MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
-  G_gene_buffer_surround[, MAF > 0.5 & !is.na(MAF)] <-
-    2 - G_gene_buffer_surround[, MAF > 0.5 & !is.na(MAF)]
+  flip_to_minor <- MAF > 0.5 & !is.na(MAF)
+  G_gene_buffer_surround[, flip_to_minor] <-
+    2 - G_gene_buffer_surround[, flip_to_minor, drop = FALSE]
   MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
   MAC       <- apply(G_gene_buffer_surround, 2, sum)
   s         <- apply(G_gene_buffer_surround, 2, sd)
@@ -1036,6 +1046,19 @@ GeneScan3D.KnockoffGeneration <- function(
   }
   G_gene_buffer_surround               <- Matrix::Matrix(G_gene_buffer_surround[, SNP.index])
   variants_gene_buffer_surround_filter <- variants_gene_buffer_surround[SNP.index]
+  variant_metadata_filter <- as.data.frame(
+    variant_metadata_gene_buffer_surround[SNP.index, , drop = FALSE],
+    stringsAsFactors = FALSE
+  )
+  counted <- as.character(variant_metadata_filter$counted_allele)
+  opposite <- ifelse(
+    counted == as.character(variant_metadata_filter$a1),
+    as.character(variant_metadata_filter$a2),
+    as.character(variant_metadata_filter$a1)
+  )
+  variant_metadata_filter$coded_allele <- ifelse(
+    flip_to_minor[SNP.index], opposite, counted
+  )
   colnames(G_gene_buffer_surround)     <-
     extract_position_universal(colnames(G_gene_buffer_surround))
 
@@ -1045,6 +1068,20 @@ GeneScan3D.KnockoffGeneration <- function(
     variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
   ]
   if (length(positions_gene_buffer) == 0) return(NULL)
+  gene_buffer_index <-
+    variants_gene_buffer_surround_filter <= gene_buffer.pos[2] &
+    variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
+  current_context <- .make_knockoff_context(
+    test_type = "Gene_Centric_GLM",
+    M = M,
+    genome_build = genome_build,
+    # Construction uses the complete post-QC surround matrix, so safe reuse
+    # must fingerprint every predictor, not only the returned buffer columns.
+    variant_metadata = variant_metadata_filter,
+    reference_id = reference_id,
+    construction_id = "GeneScan3DKnock-gene-buffer-v1;impute=fixed;corr_max=0.75;maxBP=10000;corr_base=0.05;thres_ultrarare=25;R2=0.75",
+    random_seed = knockoff_seed
+  )
 
   # ---- Gene buffer knockoff: save / load / generate -----------------------
   # create.MK.AL_gene_buffer takes the POST-QC surround matrix as input.
@@ -1055,23 +1092,27 @@ GeneScan3D.KnockoffGeneration <- function(
     knockoff_file  = knockoff_file,
     matched_ids    = matched_ids,
     p_expected     = length(positions_gene_buffer),
-    gen_fun        = function() {
-      create.MK.AL_gene_buffer(
-        X                 = G_gene_buffer_surround,   # surround matrix
-        pos               = variants_gene_buffer_surround_filter,
-        gene_buffer_start = gene_buffer.pos[1],
-        gene_buffer_end   = gene_buffer.pos[2],
-        M                 = M,
-        corr_max          = 0.75,
-        maxN.neighbor     = Inf,
-        maxBP.neighbor    = 10000,
-        corr_base         = 0.05,
-        n.AL              = floor(10 * n^(1/3) * log(n)),
-        thres.ultrarare   = 25,
-        R2.thres          = 0.75
-      )
-    },
-    snp_pos        = positions_gene_buffer
+    gen_fun        = function() .with_local_seed(
+      .derive_unit_seed(knockoff_seed, "gene_buffer"),
+      function() {
+        create.MK.AL_gene_buffer(
+          X                 = G_gene_buffer_surround,   # surround matrix
+          pos               = variants_gene_buffer_surround_filter,
+          gene_buffer_start = gene_buffer.pos[1],
+          gene_buffer_end   = gene_buffer.pos[2],
+          M                 = M,
+          corr_max          = 0.75,
+          maxN.neighbor     = Inf,
+          maxBP.neighbor    = 10000,
+          corr_base         = 0.05,
+          n.AL              = floor(10 * n^(1/3) * log(n)),
+          thres.ultrarare   = 25,
+          R2.thres          = 0.75
+        )
+      }
+    ),
+    snp_pos        = positions_gene_buffer,
+    context        = current_context
   )
   if (is.null(G_gene_buffer_knockoff)) return(NULL)
 
@@ -1158,19 +1199,24 @@ GeneScan3D.KnockoffGeneration <- function(
 
       # Generate enhancer knockoff fresh (NOT saved)
       # BUG FIX: was create.MK.AL_Enhancer(..., M=5) — hardcoded
-      G_Enh_knockoff <- create.MK.AL_Enhancer(
-        X               = G_Enh_surround,          # surround matrix
-        pos             = pos_Enh_filter,
-        Enhancer_start  = as.numeric(Enhancer.pos[r, 1]),
-        Enhancer_end    = as.numeric(Enhancer.pos[r, 2]),
-        M               = M,                       
-        corr_max        = 0.75,
-        maxN.neighbor   = Inf,
-        maxBP.neighbor  = 10000,
-        corr_base       = 0.05,
-        n.AL            = floor(10 * n^(1/3) * log(n)),
-        thres.ultrarare = 25,
-        R2.thres        = 0.75
+      G_Enh_knockoff <- .with_local_seed(
+        .derive_unit_seed(knockoff_seed, "enhancer", r),
+        function() {
+          create.MK.AL_Enhancer(
+            X               = G_Enh_surround,          # surround matrix
+            pos             = pos_Enh_filter,
+            Enhancer_start  = as.numeric(Enhancer.pos[r, 1]),
+            Enhancer_end    = as.numeric(Enhancer.pos[r, 2]),
+            M               = M,
+            corr_max        = 0.75,
+            maxN.neighbor   = Inf,
+            maxBP.neighbor  = 10000,
+            corr_base       = 0.05,
+            n.AL            = floor(10 * n^(1/3) * log(n)),
+            thres.ultrarare = 25,
+            R2.thres        = 0.75
+          )
+        }
       )
 
       positions_enhancer <- pos_Enh_filter[
@@ -1257,19 +1303,36 @@ GeneScan3DKnock<-function(M=5,p0=GeneScan3DKnock.example$GeneScan3D.original,
                                      GeneScan3DKnock.example$GeneScan3D.ko3,
                                      GeneScan3DKnock.example$GeneScan3D.ko4,
                                      GeneScan3DKnock.example$GeneScan3D.ko5),fdr = 0.1,gene_id=GeneScan3DKnock.example$gene.id){
-   
+   if (length(M) != 1L || is.na(M) || !is.finite(M) || M < 1 || M != as.integer(M)) {
+      stop("M must be a positive integer.", call. = FALSE)
+   }
+   M <- as.integer(M)
+   p0 <- as.numeric(p0)
+   if (is.null(dim(p_ko)) && length(p0) == 1L && length(p_ko) == M) {
+      p_ko <- matrix(p_ko, nrow = 1L)
+   } else {
+      p_ko <- as.matrix(p_ko)
+   }
+   if (nrow(p_ko) != length(p0)) {
+      stop("p0 and p_ko must have the same number of testing units.", call. = FALSE)
+   }
+   if (ncol(p_ko) != M) {
+      stop("The number of p_ko columns must equal M.", call. = FALSE)
+   }
+   if (length(gene_id) != length(p0)) {
+      stop("gene_id must have one value per testing unit.", call. = FALSE)
+   }
+
    p=cbind(p0,p_ko)
    #calculate knockoff statistics W, kappa, tau for given original p-value and M knockoff p-values
    T=-log10(p)
-   
 
    W=(T[,1]-apply(T[,2:(M+1)],1,median))*(T[,1]>=apply(T[,2:(M+1)],1,max))
    kappa=apply(T,1,which.max)-1 #max T is from original data (0) or knockoff data (1 to 5)
    tau=apply(T,1,max)-apply(T,1,function(x)median(x[-which.max(x)]))
-   Rej.Bound=10000 
-   b=order(tau, kappa, decreasing=c(T, F))
+   Rej.Bound=10000
+   b=order(tau, kappa, decreasing=c(TRUE, FALSE))
    c_0=kappa[b]==0  #only calculate q-value for kappa=0
-   # print("success")
    #calculate ratios for top Rej.Bound tau values
    ratio<-c();temp_0<-0
    for(i in 1:length(b)){
@@ -1279,20 +1342,18 @@ GeneScan3DKnock<-function(M=5,p0=GeneScan3DKnock.example$GeneScan3D.original,
       ratio<-c(ratio,temp_ratio)
       if(i>Rej.Bound){break}
    }
-   # print("success")
    #calculate q value for each gene/window
    qvalue=rep(1,length(tau))
    for(i in 1:length(b)){
       qvalue[b[i]]=min(ratio[i:min(length(b),Rej.Bound)])*c_0[i]+1-c_0[i] #only calculate q-value for kappa=0, q-value for kappa!=0 is 1
       if(i>Rej.Bound){break}
    }
-   print(table(qvalue))
    #W statistics threshold
    W.threshold=MK.threshold.byStat(kappa,tau,M=M,fdr=fdr,Rej.Bound=Rej.Bound)
-   
+
    #gene is significant if its q value less or equal than the fdr threshold; OR W>=W.threshold
    gene_sign=as.character(gene_id[which(qvalue<=fdr)])
-   
+
    return(list(W=W,W.threshold=W.threshold,Qvalue=pmin(qvalue, 1),gene_sign=gene_sign))
 }
 
@@ -1582,23 +1643,3 @@ sparse.cov.cross <- function(x,y){
    covmat <- (as.matrix(crossprod(x,y)) - n*tcrossprod(cMeans.x,cMeans.y))/(n-1)
    list(cov=covmat)
 }
-#knockoff filter
-MK.threshold.byStat<-function (kappa,tau,M,fdr = 0.1,Rej.Bound=10000){
-   b<-order(tau,decreasing=T)
-   c_0<-kappa[b]==0
-   ratio<-c();temp_0<-0
-   for(i in 1:length(b)){
-      #if(i==1){temp_0=c_0[i]}
-      temp_0<-temp_0+c_0[i]
-      temp_1<-i-temp_0
-      temp_ratio<-(1/M+1/M*temp_1)/max(1,temp_0)
-      ratio<-c(ratio,temp_ratio)
-      if(i>Rej.Bound){break}
-   }
-   ok<-which(ratio<=fdr)
-   if(length(ok)>0){
-      #ok<-ok[which(ok-ok[1]:(ok[1]+length(ok)-1)<=0)]
-      return(tau[b][ok[length(ok)]])
-   }else{return(Inf)}
-}
-

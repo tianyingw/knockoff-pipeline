@@ -17,6 +17,11 @@ run_batch_gene <- function(
   M,
   genome_build,
   Gsub.id,
+  bim_metadata,
+  plink_keep_file     = NULL,
+  reference_id        = NULL,
+  seed                = NULL,
+  use_glmm            = FALSE,
   abc_df,
   gh_df,
   sparseSigma         = NULL,
@@ -36,25 +41,48 @@ run_batch_gene <- function(
   gene_buffer_extension <- 5000 + 50000
   start_all    <- min(genes[kk_vec, start]) - gene_buffer_extension
   end_all      <- max(genes[kk_vec, end])   + gene_buffer_extension
+  batch_bim <- bim_metadata[
+    bim_metadata$pos >= start_all & bim_metadata$pos <= end_all, , drop = FALSE
+  ]
+  # A gene batch can legitimately have no variants in the input dataset.
+  # Skip that empty analysis unit before PLINK turns it into a no-output error.
+  if (nrow(batch_bim) == 0L) return(NULL)
+
   batch_prefix <- file.path(tmpdir, sprintf("temp_chr%d_batch_%d_%d",
                                             chr, min(kk_vec), max(kk_vec)))
 
-  system(sprintf(
-    "%s --bfile %s --chr %s --from-bp %d --to-bp %d --recode A --out %s --silent",
-    plink_prefix, geno.file, chr, start_all, end_all, batch_prefix
-  ), ignore.stdout = TRUE, ignore.stderr = TRUE)
+  keep_arg <- if (is.null(plink_keep_file)) "" else
+    paste("--keep", shQuote(plink_keep_file))
+  status <- .run_plink_additive_export(
+    plink_prefix = plink_prefix, geno_file = geno.file, chr = chr,
+    start = start_all, stop = end_all, keep_arg = keep_arg,
+    out_prefix = batch_prefix
+  )
+  if (!identical(status, 0L))
+    stop("PLINK failed while exporting chr", chr, ":", start_all, "-", end_all, ".")
 
   raw_file <- paste0(batch_prefix, ".raw")
   if (!file.exists(raw_file)) return(NULL)
-  raw <- data.table::fread(raw_file, data.table = FALSE)
+  raw <- data.table::fread(
+    raw_file, data.table = FALSE, check.names = FALSE,
+    keepLeadingZeros = TRUE
+  )
   unlink(paste0(batch_prefix, c(".raw", ".log", ".nosex")), force = TRUE)
   if (ncol(raw) <= 6) return(NULL)
 
   message("  Batch ", b, " / ", length(batch_index),
               " (snp ", start_all, "-", end_all, ")")
 
-  G_batch        <- as.matrix(raw[, -(1:6), drop = FALSE])
-  variants_batch <- extract_position_universal(colnames(G_batch))
+  prepared <- .prepare_raw_genotypes(
+    raw = raw, target_ids = Gsub.id, bim_metadata = batch_bim
+  )
+  G_batch <- prepared$geno
+  variants_batch <- as.numeric(prepared$variant_metadata$pos)
+  variant_metadata_batch <- prepared$variant_metadata
+  # Downstream upstream-method functions expect numeric positions in the
+  # genotype column names.  These values now come from .bim, never from rsID
+  # digits or another filename convention.
+  colnames(G_batch) <- as.character(variants_batch)
   rm(raw); gc()
 
   ## ===== Per-gene function =====
@@ -63,6 +91,9 @@ run_batch_gene <- function(
       gene_start <- genes[kk, start]
       gene_end   <- genes[kk, end]
       gene_id    <- genes[kk, id]
+      knockoff_seed <- .derive_unit_seed(
+        seed, "Gene_Centric", chr, as.character(gene_id)
+      )
 
       # Knockoff file path for this gene (gene_buffer knockoff only)
       ko_file <- if (!is.null(knockoff_dir))
@@ -70,12 +101,10 @@ run_batch_gene <- function(
                   paste0("gene_", gsub("[^a-zA-Z0-9._-]", "_", gene_id), "_ko.rds"))
       else NULL
 
-      # Skip if stage1 and file already exists
-      if (isTRUE(stage1_only) && isTRUE(read_mid_exist) &&
-          !is.null(ko_file) && file.exists(ko_file)) {
-        message("    Gene ", gene_id, ": knockoff exists — skipping.")
-        return(invisible(NULL))
-      }
+      load_this_gene <- isTRUE(load_knockoff) ||
+        (isTRUE(stage1_only) && isTRUE(read_mid_exist) &&
+           !is.null(ko_file) && file.exists(ko_file))
+      save_this_gene <- isTRUE(save_knockoff) && !load_this_gene
 
       # Gene buffer SNPs (±5kb around gene body)
       idx_gene_buffer <- which(variants_batch >= gene_start-5000 & variants_batch <= gene_end+5000)
@@ -85,6 +114,9 @@ run_batch_gene <- function(
       print(paste0("Gene ", gene_id, ": ", length(idx_gene_buffer), " SNPs in buffer region, ", length(idx_gene_surround), " SNPs in surrounding region."))
 
       G_gene          <- G_batch[, idx_gene_surround, drop = FALSE]
+      variant_metadata_gene <- variant_metadata_batch[
+        idx_gene_surround, , drop = FALSE
+      ]
       gene_buffer.pos <- c(min(variants_batch[idx_gene_buffer]),
                            max(variants_batch[idx_gene_buffer]))
 
@@ -121,7 +153,7 @@ run_batch_gene <- function(
       }
 
       # Dispatch to analysis function
-      if (is.null(sparseSigma)) {
+      if (!isTRUE(use_glmm)) {
         full_results <- GeneScan3D.KnockoffGeneration(
           G_gene_buffer_surround        = G_gene,
           variants_gene_buffer_surround = variants_batch[idx_gene_surround],
@@ -136,8 +168,12 @@ run_batch_gene <- function(
           result.null.model             = obj_nullmodel,
           M                             = M,
           Gsub.id                       = Gsub.id,
-          save_knockoff                 = save_knockoff,
-          load_knockoff                 = load_knockoff,
+          variant_metadata_gene_buffer_surround = variant_metadata_gene,
+          genome_build                  = genome_build,
+          reference_id                  = reference_id,
+          knockoff_seed                 = knockoff_seed,
+          save_knockoff                 = save_this_gene,
+          load_knockoff                 = load_this_gene,
           knockoff_file                 = ko_file,
           knockoff_sample_ids           = knockoff_sample_ids,
           stage1_only                   = stage1_only
@@ -159,8 +195,12 @@ run_batch_gene <- function(
           Gsub.id                       = Gsub.id,
           sparseSigma                   = sparseSigma,
           ratio                         = ratio,
-          save_knockoff                 = save_knockoff,
-          load_knockoff                 = load_knockoff,
+          variant_metadata_gene_buffer_surround = variant_metadata_gene,
+          genome_build                  = genome_build,
+          reference_id                  = reference_id,
+          knockoff_seed                 = knockoff_seed,
+          save_knockoff                 = save_this_gene,
+          load_knockoff                 = load_this_gene,
           knockoff_file                 = ko_file,
           knockoff_sample_ids           = knockoff_sample_ids,
           stage1_only                   = stage1_only
@@ -183,6 +223,7 @@ run_batch_gene <- function(
       return(results)
 
     }, error = function(e) {
+      if (isTRUE(load_knockoff) || isTRUE(stage1_only)) stop(e)
       message("  !! Gene ", genes[kk, id], " (chr ", chr, ") failed: ",
               conditionMessage(e))
       NULL
@@ -190,6 +231,11 @@ run_batch_gene <- function(
   }
 
   out <- parallel::mclapply(kk_vec, safe_fun, mc.cores = user_cores)
+  failed <- vapply(out, inherits, logical(1), what = "try-error")
+  if (any(failed)) {
+    stop("Gene batch ", b, " failed while validating or loading saved knockoffs: ",
+         paste(as.character(out[failed]), collapse = "; "))
+  }
   out <- Filter(Negate(is.null), out)
   rm(G_batch); gc()
 
@@ -201,15 +247,14 @@ run_batch_gene <- function(
 
 # .gene_ko_load_or_gen -------------------------------------------------------
 # Load gene_buffer knockoff from RDS, or generate fresh.
-# Validates column count (SNP positions):
-#   mismatch → regenerate (SCIP dependency structure has changed).
-# Validates sample overlap:
-#   current ⊆ saved → row-subset (safe: marginal exchangeability holds)
-#   current ⊄ saved → regenerate (new samples never participated in SCIP fit)
+# Validates test type, M, build, reference identifier, and the complete ordered
+# variant/allele fingerprint. Any mismatch fails closed.
+# The saved and current character-IID sets must match exactly; row order may
+# differ and is aligned explicitly.
 #
 # Knockoff RDS format:
 #   $G_gene_buffer_knockoff  — array [M × n × p_gene_buffer]
-#   $sample_ids              — numeric, length n (matched_ids from stage1)
+#   $sample_ids              — character, length n (matched_ids from stage1)
 #   $snp_pos                 — numeric, length p_gene_buffer
 # ---------------------------------------------------------------------------
 .gene_ko_load_or_gen <- function(
@@ -219,60 +264,52 @@ run_batch_gene <- function(
   matched_ids,
   p_expected,    # number of SNPs in gene buffer after QC (current run)
   gen_fun,       # zero-arg function that returns the knockoff array
-  snp_pos        # current SNP positions for saving
+  snp_pos,       # current SNP positions for saving
+  context
 ) {
   need_generate <- TRUE
 
-  if (isTRUE(load_knockoff) && !is.null(knockoff_file) && file.exists(knockoff_file)) {
-    tryCatch({
-      ko_obj  <- readRDS(knockoff_file)
-      arr     <- ko_obj$G_gene_buffer_knockoff
-      saved_n <- dim(arr)[2]
-      saved_p <- dim(arr)[3]
-      n_cur   <- length(matched_ids)
+  if (isTRUE(load_knockoff)) {
+    if (is.null(knockoff_file) || !file.exists(knockoff_file))
+      stop("Required saved knockoff file not found: ", knockoff_file)
+    ko_obj <- readRDS(knockoff_file)
+    .assert_knockoff_context(ko_obj$context, context, knockoff_file)
+    arr <- ko_obj$G_gene_buffer_knockoff
+    if (length(dim(arr)) != 3L || dim(arr)[1L] != context$M ||
+        dim(arr)[3L] != p_expected)
+      stop("Saved gene knockoff array has incompatible dimensions: ", knockoff_file)
 
-      # Check column count (SNP number after QC)
-      if (saved_p != p_expected) {
-        warning(sprintf(
-          "Saved knockoff: %d SNP cols, current QC: %d — regenerating.",
-          saved_p, p_expected
-        ))
-      } else {
-        # Column counts match — check sample overlap before reusing
-        current_ids <- as.numeric(matched_ids)
-        saved_ids   <- as.numeric(ko_obj$sample_ids)
-
-        if (.need_regenerate_samples(current_ids, saved_ids)) {
-          n_new <- sum(!current_ids %in% saved_ids)
-          warning(sprintf(
-            "%d sample(s) in current data not found in saved knockoff — regenerating.",
-            n_new
-          ))
-          # need_generate remains TRUE
-        } else {
-          # Current samples ⊆ saved samples — reindex rows (subset, safe under exchangeability)
-          row_map <- match(current_ids, saved_ids)
-          arr           <- arr[, row_map, , drop = FALSE]
-          need_generate <- FALSE
-        }
-      }
-    }, error = function(e) {
-      warning("Failed to load knockoff file: ", conditionMessage(e), "; regenerating.")
-    })
+    current_ids <- as.character(matched_ids)
+    saved_ids <- as.character(ko_obj$sample_ids)
+    if (.need_regenerate_samples(current_ids, saved_ids)) {
+      stop(
+        "Saved knockoff cannot be reused because its sample-ID set differs ",
+        "from the current run: ", knockoff_file, ". Regenerate knockoffs for ",
+        "the exact analysis sample set."
+      )
+    }
+    row_map <- match(current_ids, saved_ids)
+    arr <- arr[, row_map, , drop = FALSE]
+    need_generate <- FALSE
   }
 
   if (need_generate) {
     arr <- gen_fun()
     if (is.null(arr)) return(NULL)
+    if (length(dim(arr)) != 3L || dim(arr)[1L] != context$M ||
+        dim(arr)[2L] != length(matched_ids) || dim(arr)[3L] != p_expected)
+      stop("Generated gene knockoff array has incompatible dimensions.")
 
     if (isTRUE(save_knockoff) && !is.null(knockoff_file)) {
-      saveRDS(
+      dir.create(dirname(knockoff_file), recursive = TRUE, showWarnings = FALSE)
+      .atomic_save_rds(
         list(
           G_gene_buffer_knockoff = arr,
           sample_ids             = matched_ids,
-          snp_pos                = snp_pos
+          snp_pos                = snp_pos,
+          context                = context
         ),
-        file = knockoff_file
+        path = knockoff_file
       )
     }
   }

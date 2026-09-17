@@ -1,4 +1,6 @@
 ^LICENSE\.md$
+^\.zenodo\.json$
+^SAIGE_new$
 ^SAIGE_new/extdata/input/
 ^SAIGE_new/extdata/output/
 ^SAIGE_new/plink-ng/

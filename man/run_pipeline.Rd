@@ -18,10 +18,14 @@ run_pipeline(
   geno_missing_imputation = "fixed",
   plink_path = "plink2",
   M = 5L,
+  seed = NULL,
   genome_build = "hg19",
+  ld_block_file = NULL,
   sample_uncorrelated = TRUE,
   grm_file = NULL,
   grm_id_file = NULL,
+  relatedness_cutoff = 0.125,
+  n_markers_grm = 1000L,
   fdr = 0.1,
   chromosomes = 1:22,
   batch_size = 20L,
@@ -46,9 +50,10 @@ run_pipeline(
 \item{phenotype}{Character \strong{vector} of phenotype column name(s),
 or \code{NULL} when \code{pipeline_stage = "stage1_knockoff"}.
 When multiple phenotypes are provided, samples with missing values in
-\emph{any} phenotype or covariate are removed once before any analysis,
-knockoffs are generated and persisted internally on the first pass and
-reused for all subsequent phenotypes.}
+\emph{any} phenotype or covariate are removed once before any analysis.
+Reusable knockoffs are generated and persisted internally on the first pass:
+SNP/window and gene-buffer knockoffs are reused, whereas gene-centric
+enhancer knockoffs are regenerated for each phenotype.}
 
 \item{pheno_id}{Character or \code{NULL}. Column name of the sample ID
 in the phenotype file. \code{NULL} assumes rows are already aligned with
@@ -65,23 +70,48 @@ names, or \code{NULL}.}
 \item{sliding_window_length}{Integer vector. Sliding window sizes (bp).
 Default \code{c(1000, 5000, 10000)}.}
 
-\item{geno_missing_imputation}{Character. Genotype imputation method.
-Default \code{"fixed"}.}
+\item{geno_missing_imputation}{Character. Genotype imputation method for
+\code{"Single_Window"}: \code{"fixed"}, \code{"random"}, or
+\code{"bestguess"}. Default \code{"fixed"}. \code{"Gene_Centric"}
+currently uses fixed imputation.}
 
-\item{plink_path}{Character. Path to PLINK executable. Default
+\item{plink_path}{Character. Path to a PLINK 1.9 or PLINK 2 executable.
+The additive-export syntax is selected from the executable version. Default
 \code{"plink2"}.}
 
 \item{M}{Integer. Number of knockoff copies. Default \code{5}.}
 
+\item{seed}{Integer or \code{NULL}. Optional base seed. When set, each
+chromosome/block or gene receives a deterministic derived seed so parallel
+and resumed runs regenerate the same knockoffs. It is required when
+\code{geno_missing_imputation = "random"}. Supply a seed for reproducible
+restart, stage-1/stage-2, or multi-phenotype runs; with \code{NULL}, independent
+process restarts are not reproducible. Default \code{NULL}.}
+
 \item{genome_build}{Character. One of \code{"hg19"} or \code{"hg38"}.}
 
-\item{sample_uncorrelated}{Logical. \code{TRUE} fits a standard null model;
-\code{FALSE} fits a GLMM via SAIGE.}
+\item{ld_block_file}{Character or \code{NULL}. Optional ancestry-matched LD
+block file for \code{"Single_Window"}; it must contain \code{chr},
+\code{start}, and \code{stop} columns. The bundled European-ancestry
+resource for \code{genome_build} is used when \code{NULL}.}
+
+\item{sample_uncorrelated}{Logical model-path selector. \code{TRUE} fits a
+standard GLM and does not test or prune sample relatedness; \code{FALSE}
+selects the BIGKnock/SAIGE GLMM path for \code{"Gene_Centric"}.
+\code{"Single_Window"} currently accepts \code{TRUE} only.}
 
 \item{grm_file}{Character or \code{NULL}. Path to the sparse GRM file.}
 
 \item{grm_id_file}{Character or \code{NULL}. Path to the sparse GRM ID
 file.}
+
+\item{relatedness_cutoff}{Numeric. SAIGE sparse-GRM relatedness cutoff.
+Default \code{0.125}. Used when \code{sample_uncorrelated = FALSE} and the
+pipeline constructs a sparse GRM because \code{grm_file = NULL}.}
+
+\item{n_markers_grm}{Integer. Number of randomly selected markers used when
+constructing a sparse GRM. Default \code{1000}. Used when
+\code{sample_uncorrelated = FALSE} and \code{grm_file = NULL}.}
 
 \item{fdr}{Numeric in \code{(0, 1)}. Target FDR level. Default
 \code{0.1}.}
@@ -92,8 +122,11 @@ file.}
 \item{batch_size}{Integer. Genes per batch in gene-centric mode. Default
 \code{20}.}
 
-\item{read_mid_exist}{Logical. Skip chromosomes with existing intermediate
-files. Default \code{TRUE}.}
+\item{read_mid_exist}{Logical. Resume from compatible block-, batch-, or
+chromosome-level intermediate files when \code{TRUE}. A versioned manifest
+must match the current input identities and settings. \code{FALSE} removes
+and recreates only the dedicated \code{mid} directory for a fresh run.
+Default \code{TRUE}.}
 
 \item{pipeline_stage}{Character. Controls the run mode:
 \describe{
@@ -102,10 +135,9 @@ files. Default \code{TRUE}.}
 association testing. Writes a sample-list file for reproducibility.
 Implies \code{save_knockoff = TRUE}.}
 \item{\code{"stage2_analysis"}}{Load pre-generated knockoffs and run
-association testing only. Requires \code{knockoff_dir}.
-Sample overlap between the saved knockoffs and the current
-genotype/phenotype data is validated automatically, with warnings
-for any discrepancies.}
+association testing only. Requires \code{knockoff_dir}. The saved and current
+character-IID sets must match exactly, although row order may differ;
+incompatible sample, variant, or run metadata produce an error.}
 }}
 
 \item{save_knockoff}{Logical or \code{NULL}. Controls whether the knockoff
@@ -113,8 +145,13 @@ directory is \strong{retained} after the run completes.
 \code{NULL} (default) sets this automatically to \code{TRUE} when
 \code{pipeline_stage = "stage1_knockoff"}, and \code{FALSE} otherwise.
 For multi-phenotype runs knockoffs are always written to disk internally
-during the run (so they can be reused across phenotypes), but they are
-deleted at the end if \code{save_knockoff = FALSE}.}
+during the run (so they can be reused across phenotypes). A temporary
+knockoff directory created by the current full run is deleted at the end
+when \code{save_knockoff = FALSE}; a pre-existing directory and every
+directory used by \code{pipeline_stage = "stage2_analysis"} are never
+recursively deleted. Use a dedicated knockoff directory because its checkpoint
+files are managed as one unit. Stage 2 treats its supplied directory as input
+and never deletes it.}
 
 \item{knockoff_dir}{Character or \code{NULL}. Directory for knockoff
 \code{.rds} files.  Defaults to \code{<outdir>/knockoffs}.  Must be
@@ -131,18 +168,80 @@ FDR control.
 }
 \details{
 \strong{Knockoff file format.}
-Each knockoff file is an RDS list with fields:
-\code{G_k} (knockoff matrices), \code{sample_ids} (IIDs in row order),
-and \code{snp_pos} (SNP positions, for validation).
+Each saved unit has an RDS object recording \code{sample_ids} (IIDs in row
+order), \code{snp_pos}, matrix-storage metadata, and a versioned compatibility
+context.
+
+For \code{"Single_Window"}, each \code{block_*_knockoff.rds} is a manifest,
+not a self-contained matrix file. Its \code{storage} and
+\code{descriptor_files} fields identify one file-backed \pkg{bigmemory}
+matrix per knockoff copy. The corresponding \code{.desc} descriptor and
+\code{.bin} backing files reside beside the manifest. The entire knockoff
+directory must be copied, moved, archived, or deleted as one unit; separating
+a manifest from any backing file makes it unusable. Stage 2 fails closed if a
+manifest, descriptor, or backing file is absent or unsupported.
+\code{"Gene_Centric"} knockoff arrays are stored inside their per-gene RDS
+files.
+
+\strong{Saved-knockoff compatibility.}
+Sample IDs are treated as character strings, preserving alphabetic IDs and
+leading zeros. Saved rows may be reordered, but the saved and current sample-ID
+sets must match exactly. A mismatch errors rather than silently changing the
+analysis population; prepare the final analysis subset before stage 1.
+
+Before reuse, the ordered variant fingerprint is compared exactly. It
+contains chromosome, BIM variant ID, BIM base position, both alleles, and the
+coded allele, so equal column counts alone are insufficient. The analysis
+path, \code{M}, \code{genome_build}, construction settings, and
+reference-file identity are also compared. For \code{"Single_Window"}, that identity includes the
+LD-block filename and content checksum; for \code{"Gene_Centric"}, it covers
+the gene-annotation resource. Missing or obsolete metadata and any variant,
+build, construction, \code{M}, or reference mismatch fail closed with an error rather than
+silently reusing or regenerating an incompatible knockoff.
+
+\strong{Analysis checkpoints.}
+Before intermediate scores are reused, a manifest validates the phenotype,
+character-IID sample order, PLINK and reference identities, model path, seed,
+and analysis settings. Legacy intermediates without a manifest and any
+mismatch fail closed. Setting \code{read_mid_exist = FALSE} starts fresh by
+replacing only the analysis-specific \code{mid} directory.
 
 \strong{Two-stage workflow.}
-Run stage 1 to pre-generate knockoffs, then run stage 2 with any
-phenotype.  Stage 2 reads the sample list produced by stage 1, computes
-the intersection with the current phenotype/genotype data, reindexes
-knockoff rows accordingly, and issues warnings for any lost samples.
+Run stage 1 to pre-generate knockoffs, then run stage 2 with a phenotype
+measured on that same analysis sample set. Stage 2 reads the sample list
+produced by stage 1, requires an exact character-IID set match, and reindexes
+rows if their order differs.
 
 \strong{Multiple phenotypes.}
-Supply a character vector.  Samples with missing values in \emph{any}
-phenotype or covariate are removed once.  Per-phenotype output goes to
+Supply a character vector. Samples with missing values in \emph{any}
+phenotype or covariate are removed once. SNP/window and gene-buffer knockoffs
+are reused, whereas gene-centric enhancer knockoffs are regenerated for each
+phenotype. Per-phenotype output goes to
 \code{<outdir>/<phenotype_name>/}.
+}
+\examples{
+\dontrun{
+demo_bed <- system.file(
+  "examples", "input", "demo.bed",
+  package = "KnockoffPipeline", mustWork = TRUE
+)
+demo_geno <- tools::file_path_sans_ext(demo_bed)
+demo_pheno <- system.file(
+  "examples", "input", "phenotype.csv",
+  package = "KnockoffPipeline", mustWork = TRUE
+)
+
+run_pipeline(
+  outdir = tempfile("KnockoffPipeline-SNP-Window-"),
+  test_type = "Single_Window",
+  geno_file = demo_geno,
+  pheno_file = demo_pheno,
+  phenotype = "Y",
+  pheno_id = "IID",
+  covar_cols = "X1",
+  chromosomes = 1,
+  seed = 20260915L,
+  read_mid_exist = FALSE
+)
+}
 }

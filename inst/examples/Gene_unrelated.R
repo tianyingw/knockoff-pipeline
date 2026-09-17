@@ -1,6 +1,8 @@
 library(KnockoffPipeline)
 
-example_outdir <- Sys.getenv("KNOCKOFF_OUTDIR", unset = "inst/examples/output/Gene_unrelated")
+example_outdir <- Sys.getenv(
+    "KNOCKOFF_OUTDIR", unset = tempfile("KnockoffPipeline-Gene-")
+)
 plink_bin <- Sys.getenv("PLINK_BIN", unset = "plink2")
 example_cores <- as.integer(Sys.getenv("KNOCKOFF_CORES", unset = "1"))
 
@@ -20,5 +22,7 @@ run_pipeline(
     genome_build = "hg19",
     sample_uncorrelated = TRUE,
     fdr = 0.1,
-    chromosomes = 1
+    chromosomes = 1,
+    seed = 20260915L,
+    read_mid_exist = FALSE
 )

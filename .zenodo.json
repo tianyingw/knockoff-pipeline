@@ -1,0 +1,27 @@
+{
+  "title": "KnockoffPipeline: A Unified R Workflow for Knockoff-Based Genome-Wide Association Analysis",
+  "upload_type": "software",
+  "description": "KnockoffPipeline is a unified R workflow for SNP/window-level and gene-centric genome-wide knockoff analyses, with checkpointed execution and validated knockoff persistence and reuse.",
+  "creators": [
+    {
+      "name": "Shen, Yujie",
+      "orcid": "0000-0003-3187-3894"
+    },
+    {
+      "name": "Wang, Tianying",
+      "orcid": "0000-0002-2826-5364"
+    },
+    {
+      "name": "Ma, Shiyang",
+      "orcid": "0000-0002-4423-5798"
+    }
+  ],
+  "license": "MIT",
+  "keywords": [
+    "knockoff inference",
+    "genome-wide association analysis",
+    "false discovery rate",
+    "R package"
+  ],
+  "version": "v1.0.1"
+}

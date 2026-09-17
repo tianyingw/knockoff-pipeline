@@ -219,7 +219,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
   return(list(result.single=result.summary.single,result.window=result.summary.window,variant.info=variant.info))
 }
 
-create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=100000,n.AL=floor(10*nrow(X)^(1/3)*log(nrow(X))),thres.ultrarare=25,R2.thres=1,method='shrinkage',bigmemory=T) {
+create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=100000,n.AL=floor(10*nrow(X)^(1/3)*log(nrow(X))),thres.ultrarare=25,R2.thres=1,method='shrinkage',bigmemory=T,backing_path=NULL,backing_prefix=NULL) {
 
   if(class(X)[1]!='dgCMatrix'){X<-Matrix(X,sparse=T)} #convert it to sparse matrix format
 
@@ -268,7 +268,21 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
 
   X_k<-list()
   for(k in 1:M){
-    if(bigmemory==T){X_k[[k]]<-big.matrix(nrow=nrow(X),ncol=ncol(X),init=0)}else{
+    if(bigmemory==T && !is.null(backing_path)){
+      if (is.null(backing_prefix) || !nzchar(backing_prefix))
+        stop("backing_prefix is required when backing_path is supplied.")
+      dir.create(backing_path, recursive = TRUE, showWarnings = FALSE)
+      backing_file <- paste0(backing_prefix, "_", k, ".bin")
+      descriptor_file <- paste0(backing_prefix, "_", k, ".desc")
+      if (any(file.exists(file.path(
+        backing_path, c(backing_file, descriptor_file)
+      )))) stop("Refusing to overwrite existing file-backed knockoff files.")
+      X_k[[k]] <- bigmemory::filebacked.big.matrix(
+        nrow = nrow(X), ncol = ncol(X), init = 0,
+        backingfile = backing_file, descriptorfile = descriptor_file,
+        backingpath = backing_path
+      )
+    }else if(bigmemory==T){X_k[[k]]<-big.matrix(nrow=nrow(X),ncol=ncol(X),init=0)}else{
       X_k[[k]]<-matrix(0,nrow=nrow(X),ncol=ncol(X))
     }
   }

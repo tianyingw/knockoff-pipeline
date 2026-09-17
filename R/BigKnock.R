@@ -1,6 +1,290 @@
-utils::globalVariables(c('create.MK.AL_gene_buffer','G_gene_buffer_surround','LD.filter',
+utils::globalVariables(c('G_gene_buffer_surround','LD.filter',
                          'surround.region','G_gene_buffer','G_EnhancerAll','p_EnhancerAll',
                          'pos_gene_buffer','G_Enhancer','n','G_enhancer_surround','pos_enhancer'))
+
+
+# BIGKnock performs an additional MAC/LD reduction before constructing a
+# knockoff.  Keep that reduction in one helper and carry the original column
+# indices through it so the observed matrix and its metadata can be reduced in
+# exactly the same way as the generated knockoff.
+.bigknock_pick_representatives <- function(indices, clusters) {
+  if (length(indices) == 0L) return(integer(0))
+  unname(vapply(unique(clusters[indices]), function(cluster_id) {
+    candidates <- indices[clusters[indices] == cluster_id]
+    candidates[sample.int(length(candidates), 1L)]
+  }, integer(1)))
+}
+
+
+.bigknock_shrinkage_prob <- function(X) {
+  nr <- nrow(X)
+  nc <- ncol(X)
+  if (nr < 2L || nc < 1L)
+    stop("BIGKnock leverage sampling requires at least two samples and one variant.",
+         call. = FALSE)
+
+  # irlba requires a positive truncated rank strictly below the smaller
+  # matrix dimension.  LD reduction can legitimately leave one surrounding
+  # variant; in that case its leverage is constant and the shrinkage mixture
+  # reduces to uniform sampling.
+  if (nc == 1L) return(rep(1 / nr, nr))
+  nv <- min(
+    floor(sqrt(nc * log(nc))),
+    nr - 1L,
+    nc - 1L
+  )
+  if (nv < 1L) return(rep(1 / nr, nr))
+
+  smaller_dim <- min(nr, nc)
+  u <- if (nv >= smaller_dim / 2) {
+    # irlba warns and offers no computational advantage when most singular
+    # vectors are requested; this branch is reached only for a small smaller
+    # dimension in normal gene-region inputs.
+    base::svd(as.matrix(X), nu = nv, nv = 0L)$u
+  } else {
+    irlba(X, nv = nv)$u
+  }
+  leverage <- rowSums(u^2)
+  leverage_total <- sum(leverage)
+  if (!is.finite(leverage_total) || leverage_total <= 0)
+    stop("BIGKnock leverage scores are not finite and positive.", call. = FALSE)
+  0.5 * (leverage / leverage_total) + 0.5 * rep(1 / nr, nr)
+}
+
+
+.bigknock_prepare_region <- function(
+  X, positions, region_start, region_end, LD_filter = 0.75,
+  min_mac = 25, label = "region"
+) {
+  # Keep the full surround sparse; converting n-by-p biobank matrices to base
+  # matrices before MAC filtering can require many unnecessary gigabytes.
+  X <- Matrix::Matrix(X, sparse = TRUE)
+  positions <- as.numeric(positions)
+  if (ncol(X) != length(positions))
+    stop("BIGKnock ", label, " positions do not match genotype columns.",
+         call. = FALSE)
+  if (ncol(X) == 0L || nrow(X) == 0L)
+    stop("BIGKnock ", label, " genotype matrix is empty.", call. = FALSE)
+  if (anyNA(positions))
+    stop("BIGKnock ", label,
+         " positions must be non-missing for feature alignment.",
+         call. = FALSE)
+
+  input_index <- seq_len(ncol(X))
+  X[X < 0 | X > 2] <- NA_real_
+  if (anyNA(X)) {
+    means <- colMeans(X, na.rm = TRUE)
+    missing <- which(is.na(X), arr.ind = TRUE)
+    X[missing] <- means[missing[, 2L]]
+  }
+
+  raw_maf <- colMeans(X) / 2
+  minor_maf <- pmin(raw_maf, 1 - raw_maf)
+  minor_mac <- 2 * nrow(X) * minor_maf
+  variances <- colMeans(X^2) - colMeans(X)^2
+  keep <- which(
+    is.finite(minor_maf) & minor_maf > 0 &
+      is.finite(minor_mac) & minor_mac >= min_mac &
+      is.finite(variances) & variances != 0
+  )
+  if (length(keep) <= 1L) {
+    stop("BIGKnock ", label,
+         " has <=1 variant after MAC and variance filtering.", call. = FALSE)
+  }
+
+  X <- X[, keep, drop = FALSE]
+  positions <- positions[keep]
+  input_index <- input_index[keep]
+  ord <- order(positions)
+  X <- X[, ord, drop = FALSE]
+  positions <- positions[ord]
+  input_index <- input_index[ord]
+
+  maf <- colMeans(X) / 2
+  flip <- is.finite(maf) & maf > 0.5
+  if (any(flip)) X[, flip] <- 2 - X[, flip, drop = FALSE]
+
+  initial_target <- positions >= region_start & positions <= region_end
+  if (sum(initial_target) <= 1L) {
+    stop("BIGKnock ", label,
+         " has <=1 target variant after MAC and variance filtering.",
+         call. = FALSE)
+  }
+
+  repeat {
+    if (ncol(X) <= 1L) break
+    cor_X <- as.matrix(sparse.cor(Matrix::Matrix(X, sparse = TRUE))$cor)
+    diag(cor_X) <- 0
+    max_corr <- suppressWarnings(max(abs(cor_X), na.rm = TRUE))
+    if (!is.finite(max_corr) || max_corr < LD_filter) break
+
+    clusters <- stats::cutree(
+      stats::hclust(stats::as.dist(1 - abs(cor_X)), method = "complete"),
+      h = 1 - LD_filter
+    )
+    in_region <- positions >= region_start & positions <= region_end
+    region_reps <- .bigknock_pick_representatives(which(in_region), clusters)
+    if (length(region_reps) == 0L)
+      stop("BIGKnock ", label,
+           " has no target variant after LD filtering.", call. = FALSE)
+    # The downstream gene statistic requires at least two target variants.
+    # Match the original BIGKnock rule: if representative filtering would
+    # collapse the target to one column, retain the current pre-filter matrix.
+    if (length(region_reps) <= 1L) break
+
+    outside <- which(!in_region)
+    outside <- outside[!clusters[outside] %in% clusters[region_reps]]
+    outside_reps <- .bigknock_pick_representatives(outside, clusters)
+    selected <- sort(c(region_reps, outside_reps))
+    selected <- selected[order(positions[selected])]
+    if (length(selected) >= ncol(X)) break
+
+    X <- X[, selected, drop = FALSE]
+    positions <- positions[selected]
+    input_index <- input_index[selected]
+  }
+
+  target <- positions >= region_start & positions <= region_end
+  if (!any(target))
+    stop("BIGKnock ", label,
+         " has no target variant after feature selection.", call. = FALSE)
+
+  X <- Matrix::Matrix(X, sparse = TRUE)
+  colnames(X) <- as.character(positions)
+  list(
+    surround_matrix = X,
+    surround_positions = positions,
+    surround_input_index = input_index,
+    target_matrix = X[, target, drop = FALSE],
+    target_positions = positions[target],
+    target_input_index = input_index[target]
+  )
+}
+
+
+.bigknock_align_generated_features <- function(
+  generated, original_matrix, input_positions, M,
+  input_metadata = NULL, label = "region"
+) {
+  required <- c("knockoff", "selected_input_index", "positions")
+  if (!is.list(generated) || !all(required %in% names(generated)))
+    stop("Generated BIGKnock ", label,
+         " object is missing feature-selection metadata.", call. = FALSE)
+
+  idx <- generated$selected_input_index
+  if (!is.numeric(idx) || length(idx) == 0L || anyNA(idx) ||
+      any(idx != as.integer(idx)) || anyDuplicated(idx) ||
+      any(idx < 1L | idx > ncol(original_matrix))) {
+    stop("Generated BIGKnock ", label,
+         " object has invalid selected column indices.", call. = FALSE)
+  }
+  idx <- as.integer(idx)
+  expected_positions <- as.numeric(input_positions[idx])
+  reported_positions <- as.numeric(generated$positions)
+  if (!identical(expected_positions, reported_positions))
+    stop("Generated BIGKnock ", label,
+         " feature positions do not match the selected original columns.",
+         call. = FALSE)
+
+  arr <- generated$knockoff
+  expected_dim <- c(as.integer(M), nrow(original_matrix), length(idx))
+  if (length(dim(arr)) != 3L || !identical(as.integer(dim(arr)), expected_dim))
+    stop("Generated BIGKnock ", label,
+         " knockoff dimensions do not match M, samples, and selected features.",
+         call. = FALSE)
+
+  metadata <- NULL
+  fingerprint <- NULL
+  if (!is.null(input_metadata)) {
+    if (nrow(input_metadata) != ncol(original_matrix))
+      stop("BIGKnock ", label,
+           " metadata do not match genotype columns.", call. = FALSE)
+    metadata <- input_metadata[idx, , drop = FALSE]
+    fingerprint <- .variant_fingerprint(metadata)
+  }
+
+  list(
+    knockoff = arr,
+    original = original_matrix[, idx, drop = FALSE],
+    positions = expected_positions,
+    metadata = metadata,
+    feature_index = idx,
+    feature_fingerprint = fingerprint
+  )
+}
+
+
+.bigknock_gene_ko_load_or_gen <- function(
+  load_knockoff, save_knockoff, knockoff_file, matched_ids,
+  original_matrix, input_positions, input_metadata, gen_fun, context
+) {
+  if (isTRUE(load_knockoff)) {
+    if (is.null(knockoff_file) || !file.exists(knockoff_file))
+      stop("Required saved knockoff file not found: ", knockoff_file)
+    ko_obj <- readRDS(knockoff_file)
+    .assert_knockoff_context(ko_obj$context, context, knockoff_file)
+    if (!identical(ko_obj$feature_schema_version, 1L) ||
+        is.null(ko_obj$selected_input_index) ||
+        is.null(ko_obj$feature_fingerprint)) {
+      stop("Saved BIGKnock feature-selection metadata are missing or obsolete: ",
+           knockoff_file, ". Regenerate the knockoff.", call. = FALSE)
+    }
+
+    current_ids <- as.character(matched_ids)
+    saved_ids <- as.character(ko_obj$sample_ids)
+    if (.need_regenerate_samples(current_ids, saved_ids)) {
+      stop(
+        "Saved knockoff cannot be reused because its sample-ID set differs ",
+        "from the current run: ", knockoff_file, ". Regenerate knockoffs for ",
+        "the exact analysis sample set."
+      )
+    }
+    row_map <- match(current_ids, saved_ids)
+    saved_arr <- ko_obj$G_gene_buffer_knockoff
+    if (length(dim(saved_arr)) != 3L ||
+        dim(saved_arr)[1L] != context$M ||
+        dim(saved_arr)[2L] != length(saved_ids)) {
+      stop("Saved BIGKnock gene-buffer knockoff dimensions are incompatible: ",
+           knockoff_file, ". Regenerate the knockoff.", call. = FALSE)
+    }
+    generated <- list(
+      knockoff = saved_arr[, row_map, , drop = FALSE],
+      selected_input_index = ko_obj$selected_input_index,
+      positions = ko_obj$snp_pos
+    )
+    aligned <- .bigknock_align_generated_features(
+      generated, original_matrix, input_positions, context$M,
+      input_metadata = input_metadata, label = "gene buffer"
+    )
+    if (!identical(ko_obj$feature_fingerprint,
+                   aligned$feature_fingerprint)) {
+      stop("Saved BIGKnock gene-buffer feature identity is incompatible: ",
+           knockoff_file, ". Regenerate the knockoff.", call. = FALSE)
+    }
+    return(aligned)
+  }
+
+  aligned <- .bigknock_align_generated_features(
+    gen_fun(), original_matrix, input_positions, context$M,
+    input_metadata = input_metadata, label = "gene buffer"
+  )
+  if (isTRUE(save_knockoff) && !is.null(knockoff_file)) {
+    dir.create(dirname(knockoff_file), recursive = TRUE, showWarnings = FALSE)
+    .atomic_save_rds(
+      list(
+        feature_schema_version = 1L,
+        G_gene_buffer_knockoff = aligned$knockoff,
+        sample_ids = matched_ids,
+        snp_pos = aligned$positions,
+        selected_input_index = aligned$feature_index,
+        feature_fingerprint = aligned$feature_fingerprint,
+        context = context
+      ),
+      path = knockoff_file
+    )
+  }
+  aligned
+}
 
 # GeneScan3D.UKB.GLMM.KnockoffGeneration ------------------------------------
 # Changes vs original:
@@ -28,6 +312,10 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   MAC.threshold                 = 10,
   MAF.threshold                 = 0.01,
   Gsub.id                       = NULL,
+  variant_metadata_gene_buffer_surround = NULL,
+  genome_build                  = NULL,
+  reference_id                  = NULL,
+  knockoff_seed                 = NULL,
   save_knockoff                 = FALSE,
   load_knockoff                 = FALSE,
   knockoff_file                 = NULL,
@@ -35,6 +323,11 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   stage1_only                   = FALSE
 ) {
   impute.method <- "fixed"
+
+  if (is.null(variant_metadata_gene_buffer_surround) ||
+      nrow(variant_metadata_gene_buffer_surround) != ncol(G_gene_buffer_surround)) {
+    stop("Variant metadata from the matching PLINK .bim rows must be supplied for every gene-surround column.")
+  }
 
   # ---- Sample matching (supports NULL null model for stage1) ---------------
   if (is.null(result.null.model)) {
@@ -74,8 +367,9 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     G_gene_buffer_surround <- Impute(G_gene_buffer_surround, impute.method)
   }
   MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
-  G_gene_buffer_surround[, MAF > 0.5 & !is.na(MAF)] <-
-    2 - G_gene_buffer_surround[, MAF > 0.5 & !is.na(MAF)]
+  flip_to_minor <- MAF > 0.5 & !is.na(MAF)
+  G_gene_buffer_surround[, flip_to_minor] <-
+    2 - G_gene_buffer_surround[, flip_to_minor, drop = FALSE]
   MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
   s         <- apply(G_gene_buffer_surround, 2, sd)
   SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
@@ -85,6 +379,19 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   }
   G_gene_buffer_surround               <- Matrix::Matrix(G_gene_buffer_surround[, SNP.index])
   variants_gene_buffer_surround_filter <- variants_gene_buffer_surround[SNP.index]
+  variant_metadata_filter <- as.data.frame(
+    variant_metadata_gene_buffer_surround[SNP.index, , drop = FALSE],
+    stringsAsFactors = FALSE
+  )
+  counted <- as.character(variant_metadata_filter$counted_allele)
+  opposite <- ifelse(
+    counted == as.character(variant_metadata_filter$a1),
+    as.character(variant_metadata_filter$a2),
+    as.character(variant_metadata_filter$a1)
+  )
+  variant_metadata_filter$coded_allele <- ifelse(
+    flip_to_minor[SNP.index], opposite, counted
+  )
   colnames(G_gene_buffer_surround)     <-
     extract_position_universal(colnames(G_gene_buffer_surround))
 
@@ -94,47 +401,64 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
   ]
   if (length(positions_gene_buffer) == 0) return(NULL)
+  current_context <- .make_knockoff_context(
+    test_type = "Gene_Centric_GLMM",
+    M = M,
+    genome_build = genome_build,
+    # Construction uses the complete post-QC surround matrix, so safe reuse
+    # must fingerprint every predictor, not only the returned buffer columns.
+    variant_metadata = variant_metadata_filter,
+    reference_id = reference_id,
+    construction_id = "BIGKnock-gene-buffer-v3;impute=fixed;batch_flank=50000;gene_buffer=5000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
+    random_seed = knockoff_seed
+  )
 
   # ---- Gene buffer knockoff: save / load / generate -----------------------
-  # Input to generation: G_gene_buffer_surround (POST-QC surround — wider region)
-  # Output: array [M × n_matched × p_in_gene_buffer]
-  G_gene_buffer_knockoff <- .gene_ko_load_or_gen(
+  # BIGKnock performs an additional MAC/LD selection.  Its selected column
+  # indices are saved and used for both the original matrix and the knockoff.
+  gene_ko <- .bigknock_gene_ko_load_or_gen(
     load_knockoff     = load_knockoff,
     save_knockoff     = save_knockoff,
     knockoff_file     = knockoff_file,
     matched_ids       = matched_ids,
-    p_expected        = length(positions_gene_buffer),
-    gen_fun           = function() {
-      ko <- NULL
-      invisible(capture.output(
-        ko <- Knockoffgeneration.gene.buffer(
-          G_gene_buffer_surround = G_gene_buffer_surround,  # surround matrix
-          gene_buffer_start      = gene_buffer.pos[1],
-          gene_buffer_end        = gene_buffer.pos[2],
-          M                      = M
-        )
-      ))
-      ko
-    },
-    snp_pos           = positions_gene_buffer
+    original_matrix   = G_gene_buffer_surround,
+    input_positions   = variants_gene_buffer_surround_filter,
+    input_metadata    = variant_metadata_filter,
+    gen_fun           = function() .with_local_seed(
+      .derive_unit_seed(knockoff_seed, "gene_buffer"),
+      function() {
+        ko <- NULL
+        invisible(capture.output(
+          ko <- Knockoffgeneration.gene.buffer(
+            G_gene_buffer_surround = G_gene_buffer_surround,  # surround matrix
+            positions              = variants_gene_buffer_surround_filter,
+            gene_buffer_start      = gene_buffer.pos[1],
+            gene_buffer_end        = gene_buffer.pos[2],
+            M                      = M,
+            return_details         = TRUE
+          )
+        ))
+        ko
+      }
+    ),
+    context           = current_context
   )
-  if (is.null(G_gene_buffer_knockoff)) return(NULL)
-
-  # Genotype matrix for gene buffer region (for association test)
-  G_gene_buffer <- G_gene_buffer_surround[,
-    variants_gene_buffer_surround_filter %in% positions_gene_buffer
-  ]
+  G_gene_buffer_knockoff <- gene_ko$knockoff
+  G_gene_buffer <- gene_ko$original
+  positions_gene_buffer <- gene_ko$positions
 
   # ---- Stage 1: done after saving knockoff --------------------------------
   if (isTRUE(stage1_only)) return(invisible(NULL))
 
   # ---- R enhancers (always generate fresh — not saved) --------------------
-  G_EnhancerAll          <- c()
-  p_EnhancerAll_out      <- c()
-  G_EnhancerAll_knockoff <- c()
+  G_EnhancerAll          <- NULL
+  p_EnhancerAll_out      <- integer(0)
+  G_EnhancerAll_knockoff <- NULL
+  R_input                <- R
+  R                      <- 0L
 
-  if (R != 0) {
-    for (r in seq_len(R)) {
+  if (R_input != 0) {
+    for (r in seq_len(R_input)) {
       # Slice enhancer surround columns from the batch matrix
       if (r == 1) {
         G_Enh_surround        <- G_EnhancerAll_surround[,
@@ -177,25 +501,38 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
 
       # Generate enhancer knockoff fresh (NOT saved)
       # BUG FIX: was M=5 (hardcoded)
-      G_Enh_knockoff <- NULL
-      invisible(capture.output(
-        G_Enh_knockoff <- Knockoffgeneration.enhancer(
-          G_enhancer_surround = G_Enh_surround,      # surround matrix
-          enhancer_start      = as.numeric(Enhancer.pos[r, 1]),
-          enhancer_end        = as.numeric(Enhancer.pos[r, 2]),
-          M                   = M                    # FIX: was 5
-        )
-      ))
-
-      positions_enhancer <- pos_Enh_filter[
-        pos_Enh_filter <= Enhancer.pos[r, 2] &
-        pos_Enh_filter >= Enhancer.pos[r, 1]
-      ]
-      G_enhancer             <- Matrix::Matrix(
-        G_Enh_surround[, pos_Enh_filter %in% positions_enhancer])
-      G_EnhancerAll          <- cbind(G_EnhancerAll, G_enhancer)
-      p_EnhancerAll_out      <- c(p_EnhancerAll_out, dim(G_Enh_knockoff)[3])
-      G_EnhancerAll_knockoff <- abind::abind(G_EnhancerAll_knockoff, G_Enh_knockoff)
+      enhancer_generated <- .with_local_seed(
+        .derive_unit_seed(knockoff_seed, "enhancer", r),
+        function() {
+          ko <- NULL
+          invisible(capture.output(
+            ko <- Knockoffgeneration.enhancer(
+              G_enhancer_surround = G_Enh_surround,      # surround matrix
+              positions           = pos_Enh_filter,
+              enhancer_start      = as.numeric(Enhancer.pos[r, 1]),
+              enhancer_end        = as.numeric(Enhancer.pos[r, 2]),
+              M                   = M,                   # FIX: was 5
+              return_details      = TRUE
+            )
+          ))
+          ko
+        }
+      )
+      enhancer_aligned <- .bigknock_align_generated_features(
+        enhancer_generated, G_Enh_surround, pos_Enh_filter, M,
+        label = paste0("enhancer ", r)
+      )
+      G_Enh_knockoff <- enhancer_aligned$knockoff
+      G_enhancer <- enhancer_aligned$original
+      G_EnhancerAll <- if (is.null(G_EnhancerAll)) G_enhancer else
+        cbind(G_EnhancerAll, G_enhancer)
+      p_EnhancerAll_out <- c(p_EnhancerAll_out, ncol(G_enhancer))
+      G_EnhancerAll_knockoff <- if (is.null(G_EnhancerAll_knockoff)) {
+        G_Enh_knockoff
+      } else {
+        abind::abind(G_EnhancerAll_knockoff, G_Enh_knockoff, along = 3L)
+      }
+      R <- R + 1L
     }
   }
 
@@ -242,12 +579,17 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
 
   GeneScan3D.Cauchy_knockoff <- matrix(NA, nrow = M, ncol = 3)
   for (k in seq_len(M)) {
-    G_gbk <- G_gene_buffer_knockoff[k, , ]
+    G_gbk <- matrix(
+      G_gene_buffer_knockoff[k, , ],
+      nrow = nrow(G_gene_buffer), ncol = ncol(G_gene_buffer)
+    )
     invisible(capture.output(
       tmp <- GeneScan3D.UKB.GLMM(
         G                    = G_gbk,
         G.EnhancerAll        = if (R > 0 && length(G_EnhancerAll_knockoff) > 0)
-                                 G_EnhancerAll_knockoff[k, , ] else NULL,
+          matrix(G_EnhancerAll_knockoff[k, , ],
+                 nrow = nrow(G_gene_buffer),
+                 ncol = sum(p_EnhancerAll_out)) else NULL,
         R                    = R,
         p_Enhancer           = p_EnhancerAll_out,
         window.size          = window.size,
@@ -273,207 +615,82 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
 }
 
 
-Knockoffgeneration.gene.buffer=function(G_gene_buffer_surround=G_gene_buffer_surround,
-                                        gene_buffer_start=gene_buffer_start,
-                                        gene_buffer_end=gene_buffer_end,
-                                        M=5,surround.region=100000,LD.filter=0.75){
-
-  #missing genotype imputation
-  G_gene_buffer_surround[G_gene_buffer_surround<0 | G_gene_buffer_surround>2]<-NA
-  N_MISS<-sum(is.na(G_gene_buffer_surround))
-  if(N_MISS>0){
-    msg<-sprintf("The missing genotype rate is %f. Imputation is applied.", N_MISS/nrow(G_gene_buffer_surround)/ncol(G_gene_buffer_surround))
-    #print(msg,call.=F)
-    colmean<-colMeans(x = G_gene_buffer_surround, na.rm = T)
-    index <- which(is.na(G_gene_buffer_surround), arr.ind=TRUE)
-    G_gene_buffer_surround[index] <- colmean[index[,2]]
-  }
-
-  #sparse matrix operation
-  MAF<-colMeans(G_gene_buffer_surround)/2;MAC<-colSums(G_gene_buffer_surround)
-  MAF[MAF>0.5]<-1-MAF[MAF>0.5]
-  MAC[MAF>0.5]<-nrow(G_gene_buffer_surround)*2-MAC[MAF>0.5]
-  s<-colMeans(G_gene_buffer_surround^2)-colMeans(G_gene_buffer_surround)^2
-  SNP.index<-which(MAF>0 & MAC>=25 & s!=0 & !is.na(MAF))
-
-  if(length(SNP.index)<=1 ){
-    msg<-'Number of variants with missing rate <=10% in the specified range is <=1'
-    #print(msg,call.=F)
-    stop
-  }
-  G_gene_buffer_surround<-G_gene_buffer_surround[,SNP.index,drop=F]
-
-  #get positions and reorder G_gene_buffer_surround
-  pos<-as.numeric(gsub("^.*\\:","",colnames(G_gene_buffer_surround)))
-  G_gene_buffer_surround<-G_gene_buffer_surround[,order(pos),drop=F]
-
-  MAF<-colMeans(G_gene_buffer_surround)/2
-  G_gene_buffer_surround<-as.matrix(G_gene_buffer_surround)
-  G_gene_buffer_surround[,MAF>0.5 & !is.na(MAF)]<-2-G_gene_buffer_surround[,MAF>0.5 & !is.na(MAF)]
-  MAF<-colMeans(G_gene_buffer_surround)/2;MAC<-colSums(G_gene_buffer_surround)
-
-  G_gene_buffer_surround<-Matrix(G_gene_buffer_surround,sparse=T)
-  pos<-as.numeric(gsub("^.*\\:","",colnames(G_gene_buffer_surround)))
-  n=dim(G_gene_buffer_surround)[1]
-
-  max.corr=1
-  while(max.corr>=LD.filter){ #max corr < 0.75
-    #clustering and filtering
-    G_gene_buffer_surround=G_gene_buffer_surround
-    sparse.fit<-sparse.cor(G_gene_buffer_surround)
-    cor.X<-sparse.fit$cor;cov.X<-sparse.fit$cov
-    range(c(cor.X)[round(c(cor.X),digits = 2)!=1.00])
-    max.corr=max(abs(c(cor.X)[round(c(cor.X),digits = 2)!=1.00]))
-
-    Sigma.distance = as.dist(1 - abs(cor.X))
-    if(ncol(G_gene_buffer_surround)>1){
-      fit = hclust(Sigma.distance, method="complete")
-      corr_max = 0.75
-      clusters = cutree(fit, h=1-corr_max)
-    }else{clusters<-1}
-
-    ##apply the LD filter before knockoff generation
-    #One variant is randomly selected as the representative per cluster.
-    #If a cluster is inside the gene-buffer region, we prioritize to keep one variant inside the gene buffer region instead of outsides
-    gene_buffer_ind=(pos>=gene_buffer_start&pos<=gene_buffer_end)
-
-    set.seed(12345)
-    temp.index.gene_buffer<-sample(sum(gene_buffer_ind))
-    temp.index.gene_buffer<-temp.index.gene_buffer[match(unique(clusters[gene_buffer_ind]),clusters[gene_buffer_ind][temp.index.gene_buffer])]
-    if(length(temp.index.gene_buffer)<=1 ){
-      msg<-'Number of variants after LD filtering in the gene buffer is <=1'
-      warning(msg,call.=F)
-      break
-    }
-    gene_buffer.index=which(gene_buffer_ind)[temp.index.gene_buffer]
-
-    ##Then filter other variants in +-100kb surrounding region
-    temp.index.surround<-sample(length(pos)-sum(gene_buffer_ind))
-    temp.index.surround<-temp.index.surround[match(unique(clusters[!gene_buffer_ind]),clusters[!gene_buffer_ind][temp.index.surround])]
-    surround.index=which(!gene_buffer_ind)[temp.index.surround]
-    surround.index=surround.index[!clusters[which(!gene_buffer_ind)[temp.index.surround]]%in%unique(clusters[gene_buffer_ind])]
-
-    temp.index=unique(c(gene_buffer.index,surround.index))
-
-    G_gene_buffer_surround<-G_gene_buffer_surround[,temp.index,drop=F]
-    pos=pos[temp.index]
-  }
-
-  #print('generating knockoffs of gene buffer region') #knockoff-AL for gene buffer, adapt the code of KnockoffScreen-AL
-  set.seed(12345)
-  G_gene_buffer_knockoff=create.MK.AL_gene_buffer(X=G_gene_buffer_surround,pos=pos,
-                                                  gene_buffer_start=gene_buffer_start,gene_buffer_end=gene_buffer_end,M=M,
-                                                  corr_max=LD.filter,maxN.neighbor=Inf,
-                                                  maxBP.neighbor=surround.region,corr_base=0.05,n.AL=floor(10*n^(1/3)*log(n)),
-                                                  thres.ultrarare=25,R2.thres=LD.filter)
-
-  return(G_gene_buffer_knockoff)
+Knockoffgeneration.gene.buffer <- function(
+  G_gene_buffer_surround = G_gene_buffer_surround,
+  positions = NULL,
+  gene_buffer_start = gene_buffer_start,
+  gene_buffer_end = gene_buffer_end,
+  M = 5, surround.region = 100000, LD.filter = 0.75,
+  return_details = FALSE
+) {
+  if (is.null(positions))
+    positions <- extract_position_universal(colnames(G_gene_buffer_surround))
+  prepared <- .bigknock_prepare_region(
+    G_gene_buffer_surround, positions,
+    gene_buffer_start, gene_buffer_end, LD.filter,
+    min_mac = 25, label = "gene buffer"
+  )
+  n <- nrow(prepared$surround_matrix)
+  knockoff <- create.MK.AL_gene_buffer_bigknock(
+    X = prepared$surround_matrix,
+    pos = prepared$surround_positions,
+    gene_buffer_start = gene_buffer_start,
+    gene_buffer_end = gene_buffer_end,
+    M = M, corr_max = LD.filter, maxN.neighbor = Inf,
+    maxBP.neighbor = surround.region, corr_base = 0.05,
+    n.AL = floor(10 * n^(1/3) * log(n)),
+    thres.ultrarare = 25, R2.thres = LD.filter
+  )
+  details <- list(
+    knockoff = knockoff,
+    selected_input_index = prepared$target_input_index,
+    positions = prepared$target_positions
+  )
+  if (isTRUE(return_details)) details else knockoff
 }
 
-Knockoffgeneration.enhancer=function(G_enhancer_surround=G_enhancer_surround,
-                                     enhancer_start=enhancer_start,
-                                     enhancer_end=enhancer_start,
-                                     M=5,surround.region=50000,LD.filter=0.75){
 
-  #missing genotype imputation
-  G_enhancer_surround[G_enhancer_surround<0 | G_enhancer_surround>2]<-NA
-  N_MISS<-sum(is.na(G_enhancer_surround))
-  if(N_MISS>0){
-    msg<-sprintf("The missing genotype rate is %f. Imputation is applied.", N_MISS/nrow(G_enhancer_surround)/ncol(G_enhancer_surround))
-    print(msg,call.=F)
-    colmean<-colMeans(x = G_enhancer_surround, na.rm = T)
-    index <- which(is.na(G_enhancer_surround), arr.ind=TRUE)
-    G_enhancer_surround[index] <- colmean[index[,2]]
-  }
-
-  #sparse matrix operation
-  MAF<-colMeans(G_enhancer_surround)/2;MAC<-colSums(G_enhancer_surround)
-  MAF[MAF>0.5]<-1-MAF[MAF>0.5]
-  MAC[MAF>0.5]<-nrow(G_enhancer_surround)*2-MAC[MAF>0.5]
-  s<-colMeans(G_enhancer_surround^2)-colMeans(G_enhancer_surround)^2
-  SNP.index<-which(MAF>0 & MAC>=25 & s!=0 & !is.na(MAF))
-
-  if(length(SNP.index)<=1 ){
-    msg<-'Number of variants with missing rate <=10% in the specified range is <=1'
-    print(msg,call.=F)
-    stop
-  }
-  G_enhancer_surround<-G_enhancer_surround[,SNP.index,drop=F]
-
-  #get positions and reorder G_enhancer_surround
-  pos<-as.numeric(gsub("^.*\\:","",colnames(G_enhancer_surround)))
-  G_enhancer_surround<-G_enhancer_surround[,order(pos),drop=F]
-
-  MAF<-colMeans(G_enhancer_surround)/2
-  G_enhancer_surround<-as.matrix(G_enhancer_surround)
-  G_enhancer_surround[,MAF>0.5 & !is.na(MAF)]<-2-G_enhancer_surround[,MAF>0.5 & !is.na(MAF)]
-  MAF<-colMeans(G_enhancer_surround)/2;MAC<-colSums(G_enhancer_surround)
-
-  G_enhancer_surround<-Matrix(G_enhancer_surround,sparse=T)
-  pos<-as.numeric(gsub("^.*\\:","",colnames(G_enhancer_surround)))
-  n=dim(G_enhancer_surround)[1]
-
-  max.corr=1
-  while(max.corr>=LD.filter){ #max corr < 0.75
-    #clustering and filtering
-    G_enhancer_surround=G_enhancer_surround
-    sparse.fit<-sparse.cor(G_enhancer_surround)
-    cor.X<-sparse.fit$cor;cov.X<-sparse.fit$cov
-    range(c(cor.X)[round(c(cor.X),digits = 2)!=1.00])
-    max.corr=max(abs(c(cor.X)[round(c(cor.X),digits = 2)!=1.00]))
-
-    Sigma.distance = as.dist(1 - abs(cor.X))
-    if(ncol(G_enhancer_surround)>1){
-      fit = hclust(Sigma.distance, method="complete")
-      corr_max = 0.75
-      clusters = cutree(fit, h=1-corr_max)
-    }else{clusters<-1}
-
-    ##apply the LD filter before knockoff generation
-    #One variant is randomly selected as the representative per cluster.
-    #If a cluster is inside the gene-buffer region, we prioritize to keep one variant inside the gene buffer region instead of outsides
-    enhancer_ind=(pos>=enhancer_start&pos<=enhancer_end)
-
-    set.seed(12345)
-    temp.index.enhancer<-sample(sum(enhancer_ind))
-    temp.index.enhancer<-temp.index.enhancer[match(unique(clusters[enhancer_ind]),clusters[enhancer_ind][temp.index.enhancer])]
-    if(length(temp.index.enhancer)<=1 ){
-      msg<-'Number of variants after LD filtering in the gene buffer is <=1'
-      warning(msg,call.=F)
-      break
-    }
-    enhancer.index=which(enhancer_ind)[temp.index.enhancer]
-
-    ##Then filter other variants in +-100kb surrounding region
-    temp.index.surround<-sample(length(pos)-sum(enhancer_ind))
-    temp.index.surround<-temp.index.surround[match(unique(clusters[!enhancer_ind]),clusters[!enhancer_ind][temp.index.surround])]
-    surround.index=which(!enhancer_ind)[temp.index.surround]
-    surround.index=surround.index[!clusters[which(!enhancer_ind)[temp.index.surround]]%in%unique(clusters[enhancer_ind])]
-
-    temp.index=unique(c(enhancer.index,surround.index))
-
-    G_enhancer_surround<-G_enhancer_surround[,temp.index,drop=F]
-    pos=pos[temp.index]
-  }
-
-#   print('generating knockoffs of enhancer')
-  set.seed(12345)
-  G_enhancer_knockoff=create.MK.AL_enhancer(X=G_enhancer_surround,pos=pos,
-                                            enhancer_start=enhancer_start,enhancer_end=enhancer_end,M=M,
-                                            corr_max=LD.filter,maxN.neighbor=Inf,
-                                            maxBP.neighbor=surround.region,corr_base=0.05,n.AL=floor(10*n^(1/3)*log(n)),
-                                            thres.ultrarare=25,R2.thres=LD.filter)
-
-  return(G_enhancer_knockoff)
+Knockoffgeneration.enhancer <- function(
+  G_enhancer_surround = G_enhancer_surround,
+  positions = NULL,
+  enhancer_start = enhancer_start,
+  enhancer_end = enhancer_start,
+  M = 5, surround.region = 50000, LD.filter = 0.75,
+  return_details = FALSE
+) {
+  if (is.null(positions))
+    positions <- extract_position_universal(colnames(G_enhancer_surround))
+  prepared <- .bigknock_prepare_region(
+    G_enhancer_surround, positions,
+    enhancer_start, enhancer_end, LD.filter,
+    min_mac = 25, label = "enhancer"
+  )
+  n <- nrow(prepared$surround_matrix)
+  knockoff <- create.MK.AL_enhancer(
+    X = prepared$surround_matrix,
+    pos = prepared$surround_positions,
+    enhancer_start = enhancer_start,
+    enhancer_end = enhancer_end,
+    M = M, corr_max = LD.filter, maxN.neighbor = Inf,
+    maxBP.neighbor = surround.region, corr_base = 0.05,
+    n.AL = floor(10 * n^(1/3) * log(n)),
+    thres.ultrarare = 25, R2.thres = LD.filter
+  )
+  details <- list(
+    knockoff = knockoff,
+    selected_input_index = prepared$target_input_index,
+    positions = prepared$target_positions
+  )
+  if (isTRUE(return_details)) details else knockoff
 }
 
 
 ######### Other functions #########
 #Optimize create.MK.AL function provided by Zihuai
 #Knockoff generation for gene buffer regions
-create.MK.AL_gene_buffer <- function(X=G_gene_buffer_surround,pos,gene_buffer_start,gene_buffer_end,M,corr_max=LD.filter,maxN.neighbor=Inf,
-                                     maxBP.neighbor=surround.region,corr_base=0.05,n.AL=floor(10*n^(1/3)*log(n)),
-                                     thres.ultrarare=25,R2.thres=LD.filter) {
+create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_buffer_start,gene_buffer_end,M,corr_max=LD.filter,maxN.neighbor=Inf,
+                                              maxBP.neighbor=surround.region,corr_base=0.05,n.AL=floor(10*n^(1/3)*log(n)),
+                                              thres.ultrarare=25,R2.thres=LD.filter) {
 
   method='shrinkage'
   sparse.fit<-sparse.cor(X)
@@ -482,19 +699,12 @@ create.MK.AL_gene_buffer <- function(X=G_gene_buffer_surround,pos,gene_buffer_st
   #svd to get leverage score, can be optimized;update: tried fast leveraging, but the R matrix is singular possibly because X is sparse.
   #Fast Truncated Singular Value Decomposition
   if(method=='shrinkage'){
-    svd.X.u<-irlba(X,nv=floor(sqrt(ncol(X)*log(ncol(X)))))$u #U is the orthogonal singular vectors
-    h1<-rowSums(svd.X.u^2)
-    h2<-rep(1,nrow(X))
-    prob1<-h1/sum(h1)
-    prob2<-h2/sum(h2)
-    prob<-0.5*prob1+0.5*prob2 #shrinkage leveraging estimator, probability weights for sampling
+    prob <- .bigknock_shrinkage_prob(X)
   }
 
   index.AL<-sample(1:nrow(X),min(n.AL,nrow(X)),replace = FALSE,prob=prob) #sampling r samples from n samples, using shrinkage leveraging estimator
   w<-1/sqrt(n.AL*prob[index.AL])
-  rm(svd.X.u) #remove temp file
-
-  X.AL<-w*X[index.AL,] #n.AL samples
+  X.AL<-w*X[index.AL, , drop = FALSE] #n.AL samples
   sum(is.na(X.AL)) #0
 
   sparse.fit<-sparse.cor(X.AL)
@@ -626,19 +836,12 @@ create.MK.AL_enhancer <- function(X=G_enhancer_surround,pos,enhancer_start,enhan
 
   #svd to get leverage score, can be optimized;update: tried fast leveraging, but the R matrix is singular possibly because X is sparse.
   if(method=='shrinkage'){
-    svd.X.u<-irlba(X,nv=floor(sqrt(ncol(X)*log(ncol(X)))))$u
-    h1<-rowSums(svd.X.u^2)
-    h2<-rep(1,nrow(X))
-    prob1<-h1/sum(h1)
-    prob2<-h2/sum(h2)
-    prob<-0.5*prob1+0.5*prob2
+    prob <- .bigknock_shrinkage_prob(X)
   }
 
   index.AL<-sample(1:nrow(X),min(n.AL,nrow(X)),replace = FALSE,prob=prob)
   w<-1/sqrt(n.AL*prob[index.AL])
-  rm(svd.X.u) #remove temp file
-
-  X.AL<-w*X[index.AL,]
+  X.AL<-w*X[index.AL, , drop = FALSE]
   sparse.fit<-sparse.cor(X.AL)
   cor.X.AL<-sparse.fit$cor;cov.X.AL<-sparse.fit$cov
   skip.index<-colSums(X.AL!=0)<=thres.ultrarare #skip features that are ultra sparse, permutation will be directly applied to generate knockoffs
@@ -1351,4 +1554,3 @@ sparse.cov.cross <- function(x,y){
   list(cov=covmat)
 }
 max_nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
-
