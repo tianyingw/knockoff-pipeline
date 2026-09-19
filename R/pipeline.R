@@ -7,12 +7,11 @@
 #' @param outdir        Character. Output directory (created recursively if absent).
 #' @param test_type     Character. One of \code{"Single_Window"} or
 #'   \code{"Gene_Centric"}.
-#' @param pheno_file    Character or \code{NULL}. Path to the phenotype file
-#'   (tab- or comma-separated). Optional when
-#'   \code{pipeline_stage = "stage1_knockoff"}; required otherwise.
+#' @param pheno_file    Character. Path to the phenotype file
+#'   (tab- or comma-separated). Required for every pipeline stage so stage 1
+#'   and downstream analysis use the same complete-case sample set.
 #' @param geno_file     Character. PLINK genotype file prefix (no extension).
-#' @param phenotype     Character \strong{vector} of phenotype column name(s),
-#'   or \code{NULL} when \code{pipeline_stage = "stage1_knockoff"}.
+#' @param phenotype     Character \strong{vector} of phenotype column name(s).
 #'   When multiple phenotypes are provided, samples with missing values in
 #'   \emph{any} phenotype or covariate are removed once before any analysis,
 #'   reusable knockoffs are generated and persisted internally on the first
@@ -73,8 +72,10 @@
 #'   \describe{
 #'     \item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
 #'     \item{\code{"stage1_knockoff"}}{Generate and save knockoffs only; no
-#'       association testing. Writes a sample-list file for reproducibility.
-#'       Implies \code{save_knockoff = TRUE}.}
+#'       association testing. First applies the same phenotype/covariate
+#'       complete-case and PLINK-ID matching rules as a full run, then writes
+#'       a sample-list file for reproducibility. Implies
+#'       \code{save_knockoff = TRUE}.}
 #'     \item{\code{"stage2_analysis"}}{Load pre-generated knockoffs and run
 #'       association testing only. Requires \code{knockoff_dir}.
 #'       The saved and current character-IID sets must match exactly (row order
@@ -95,6 +96,11 @@
 #'   files. Defaults to \code{<outdir>/knockoffs}. Must be
 #'   provided (and populated) when \code{pipeline_stage =
 #'   "stage2_analysis"}.
+#' @param temp_dir Character or \code{NULL}. Directory for temporary PLINK
+#'   exports. When \code{NULL}, a writable \code{SLURM_TMPDIR} is preferred and
+#'   R's \code{tempdir()} is used otherwise. On clusters, choose node-local
+#'   scratch rather than a shared output directory to avoid parallel I/O
+#'   contention.
 #'
 #' @details
 #' \strong{Knockoff file format.}
@@ -121,10 +127,11 @@
 #' replacing only the analysis-specific \code{mid} directory.
 #'
 #' \strong{Two-stage workflow.}
-#' Run stage 1 to pre-generate knockoffs, then run stage 2 with a phenotype
-#' measured on that same analysis sample set. Stage 2 reads the sample list
-#' produced by stage 1, requires an exact character-IID set match, and
-#' reindexes rows if their order differs.
+#' Run stage 1 with the phenotype(s) and covariates that define the analysis
+#' complete cases, then run stage 2 with the same resulting sample set. Stage 1
+#' uses these columns only to establish the sample set and does not fit a null
+#' model. Stage 2 reads the saved sample list, requires an exact character-IID
+#' set match, and reindexes rows if their order differs.
 #'
 #' \strong{Multiple phenotypes.}
 #' Supply a character vector. Samples with missing values in \emph{any}
@@ -191,7 +198,8 @@ run_pipeline <- function(
   read_mid_exist          = TRUE,
   pipeline_stage          = "full",
   save_knockoff           = NULL,
-  knockoff_dir            = NULL
+  knockoff_dir            = NULL,
+  temp_dir                = NULL
 ) {
 
   # ---------------------------------------------------------------------------
@@ -228,6 +236,10 @@ run_pipeline <- function(
   if (!is.null(save_knockoff) &&
       (!is.logical(save_knockoff) || length(save_knockoff) != 1L || is.na(save_knockoff)))
     stop("'save_knockoff' must be TRUE, FALSE, or NULL.")
+  if (!is.null(temp_dir) &&
+      (!is.character(temp_dir) || length(temp_dir) != 1L ||
+       is.na(temp_dir) || !nzchar(temp_dir)))
+    stop("'temp_dir' must be NULL or one non-empty path.")
   if (!is.character(geno_missing_imputation) ||
       length(geno_missing_imputation) != 1L ||
       !geno_missing_imputation %in% c("fixed", "random", "bestguess"))
@@ -253,14 +265,14 @@ run_pipeline <- function(
   chr_vector  <- intersect(chr_numeric, 1L:22L)
   if (length(chr_vector) == 0L) stop("No valid autosomes (1-22) in 'chromosomes'.")
 
-  if (pipeline_stage != "stage1_knockoff") {
-    if (is.null(pheno_file) || !is.character(pheno_file) || length(pheno_file) != 1L || !nzchar(pheno_file))
-      stop("'pheno_file' is required for pipeline_stage = \"", pipeline_stage, "\".")
-    if (!file.exists(pheno_file))
-      stop("Phenotype file not found: ", pheno_file)
-    if (is.null(phenotype) || !is.character(phenotype) || length(phenotype) == 0L || !all(nzchar(phenotype)))
-      stop("'phenotype' must be a non-empty character vector for pipeline_stage = \"", pipeline_stage, "\".")
-  }
+  if (is.null(pheno_file) || !is.character(pheno_file) ||
+      length(pheno_file) != 1L || !nzchar(pheno_file))
+    stop("'pheno_file' is required for every pipeline stage.")
+  if (!file.exists(pheno_file))
+    stop("Phenotype file not found: ", pheno_file)
+  if (is.null(phenotype) || !is.character(phenotype) ||
+      length(phenotype) == 0L || !all(nzchar(phenotype)))
+    stop("'phenotype' must be a non-empty character vector for every pipeline stage.")
   plink_fam <- paste0(geno_file, ".fam")
   if (!file.exists(plink_fam))
     stop("PLINK .fam not found: ", plink_fam, "\nCheck that 'geno_file' is the correct prefix.")
@@ -297,98 +309,66 @@ run_pipeline <- function(
   # ---------------------------------------------------------------------------
 
   if (!dir.exists(outdir)) { message("Creating output directory: ", outdir); dir.create(outdir, recursive = TRUE) }
+  if (is.null(temp_dir)) {
+    slurm_tmp <- Sys.getenv("SLURM_TMPDIR", unset = "")
+    temp_dir <- if (nzchar(slurm_tmp) && dir.exists(slurm_tmp) &&
+                    file.access(slurm_tmp, mode = 2L) == 0L) {
+      slurm_tmp
+    } else {
+      tempdir()
+    }
+  }
+  if (!dir.exists(temp_dir) &&
+      !dir.create(temp_dir, recursive = TRUE, showWarnings = FALSE))
+    stop("Unable to create temporary directory: ", temp_dir)
+  temp_dir <- normalizePath(temp_dir, winslash = "/", mustWork = TRUE)
+  if (file.access(temp_dir, mode = 2L) != 0L)
+    stop("Temporary directory is not writable: ", temp_dir)
   knockoff_dir_created <- .prepare_knockoff_directory(
     knockoff_dir,
     create           = ko_plan$write_first_pass,
     require_existing = ko_plan$load_first_pass
   )
   if (knockoff_dir_created) message("Creating knockoff directory: ", knockoff_dir)
-  if (user_cores > 1L) Sys.setenv(MKL_NUM_THREADS = 1)
+  if (user_cores > 1L) {
+    thread_vars <- c(
+      "MKL_NUM_THREADS", "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+      "BLIS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"
+    )
+    previous_threads <- Sys.getenv(thread_vars, unset = NA_character_)
+    on.exit({
+      present <- !is.na(previous_threads)
+      if (any(present))
+        do.call(Sys.setenv, as.list(stats::setNames(
+          previous_threads[present], thread_vars[present]
+        )))
+      if (any(!present)) Sys.unsetenv(thread_vars[!present])
+    }, add = TRUE)
+    do.call(Sys.setenv, as.list(stats::setNames(
+      rep("1", length(thread_vars)), thread_vars
+    )))
+  }
 
   # ---------------------------------------------------------------------------
   # 4.  Determine sample set
-  #     stage1_knockoff : phenotype not required -- derive Gsub.id from .fam.
-  #     full / stage2   : load phenotype file, filter missing, align to .fam.
+  #     Every stage uses the same phenotype/covariate complete-case rule and
+  #     aligns the retained samples to the PLINK .fam order.
   # ---------------------------------------------------------------------------
 
-  if (pipeline_stage == "stage1_knockoff") {
-    fam <- data.table::fread(
-      plink_fam, header = FALSE, keepLeadingZeros = TRUE,
-      col.names = c("FID","IID","PAT","MAT","SEX","PHENO")
-    )
-    fam[, IID := .as_sample_id(IID, "PLINK .fam IIDs")]
-    Gsub.id <- fam$IID
-    plink_keep_fam <- fam[, .(FID, IID)]
-    pheno <- NULL
-    all_covar_cols <- NULL
-    message(nrow(fam), " sample(s) read from .fam for knockoff generation.")
-    rm(fam); gc()
-  } else {
-    message("Reading phenotype file: ", pheno_file)
-    pheno <- data.table::fread(pheno_file, keepLeadingZeros = TRUE)
-
-    missing_pheno <- setdiff(phenotype, colnames(pheno))
-    if (length(missing_pheno) > 0L)
-      stop("Phenotype column(s) not found: ", paste(missing_pheno, collapse = ", "))
-
-    all_covar_cols <- c(covar_cols, cat_covar_cols)
-    missing_covar  <- setdiff(all_covar_cols, colnames(pheno))
-    if (length(missing_covar) > 0L)
-      stop("Covariate column(s) not found: ", paste(missing_covar, collapse = ", "))
-    if (!is.null(pheno_id) && !pheno_id %in% colnames(pheno))
-      stop("Sample ID column \"", pheno_id, "\" not found in phenotype file.")
-
-    check_cols    <- unique(c(phenotype, all_covar_cols))
-    complete_mask <- complete.cases(pheno[, check_cols, with = FALSE])
-    n_incomplete  <- sum(!complete_mask)
-    if (n_incomplete > 0L) {
-      message(sprintf(
-        "%d sample(s) removed: missing in at least one of [%s].",
-        n_incomplete, paste(check_cols, collapse = ", ")
-      ))
-      pheno <- pheno[complete_mask]
-    }
-    message(nrow(pheno), " sample(s) retained after missing-value filtering.")
-
-    fam <- data.table::fread(
-      plink_fam, header = FALSE, keepLeadingZeros = TRUE,
-      col.names = c("FID","IID","PAT","MAT","SEX","PHENO")
-    )
-    fam[, IID := .as_sample_id(IID, "PLINK .fam IIDs")]
-    plink_keep_fam <- NULL
-
-    if (!is.null(pheno_id)) {
-      pheno_iid  <- .as_sample_id(pheno[[pheno_id]],
-                                  paste0("phenotype column '", pheno_id, "'"))
-      fam_iid    <- fam$IID
-      shared_iid <- intersect(fam_iid, pheno_iid)
-
-      if (length(shared_iid) == 0L)
-        stop("No samples matched between phenotype (column \"", pheno_id,
-             "\") and PLINK .fam.\n",
-             "  Example pheno IID : ", paste(head(pheno_iid, 3L), collapse = ", "), "\n",
-             "  Example .fam  IID : ", paste(head(fam_iid,   3L), collapse = ", "))
-
-      n_pheno_only <- length(setdiff(pheno_iid, fam_iid))
-      n_fam_only   <- length(setdiff(fam_iid,   pheno_iid))
-      if (n_pheno_only > 0L) message("  ", n_pheno_only, " sample(s) in phenotype not in .fam -- excluded.")
-      if (n_fam_only   > 0L) message("  ", n_fam_only,   " sample(s) in .fam not in phenotype -- excluded.")
-      message("  ", length(shared_iid), " sample(s) matched.")
-
-      plink_keep_fam <- fam[match(shared_iid, fam_iid), .(FID, IID)]
-      pheno   <- pheno[match(shared_iid, pheno_iid)]
-      Gsub.id <- shared_iid
-    } else {
-      if (nrow(pheno) != nrow(fam))
-        stop("pheno_id is NULL but phenotype has ", nrow(pheno),
-             " rows while .fam has ", nrow(fam), " rows.")
-      plink_keep_fam <- fam[, .(FID, IID)]
-      # Even when the phenotype has no explicit ID column, retain the .fam IIDs
-      # so PLINK exports and null-model rows can be checked and aligned.
-      Gsub.id <- fam$IID
-    }
-    rm(fam); gc()
-  }
+  sample_data <- .prepare_analysis_samples(
+    pheno_file = pheno_file,
+    phenotype = phenotype,
+    pheno_id = pheno_id,
+    covar_cols = covar_cols,
+    cat_covar_cols = cat_covar_cols,
+    plink_fam = plink_fam
+  )
+  pheno <- sample_data$pheno
+  Gsub.id <- sample_data$sample_ids
+  plink_keep_fam <- sample_data$plink_keep_fam
+  all_covar_cols <- sample_data$all_covar_cols
+  all_fam_samples_retained <- sample_data$all_fam_samples_retained
+  rm(sample_data); gc()
 
   # ---------------------------------------------------------------------------
   # 6.  Stage 2: validate the exact saved sample set and restore its row order
@@ -426,10 +406,21 @@ run_pipeline <- function(
   # Write one PLINK keep file for every genotype export. PLINK does not promise
   # to follow keep-file order, so each .raw file is also reordered explicitly
   # by IID in .prepare_raw_genotypes().
-  plink_keep_file <- tempfile("KnockoffPipeline_keep_", fileext = ".fam")
-  data.table::fwrite(plink_keep_fam, plink_keep_file, sep = "\t",
-                     col.names = FALSE)
-  on.exit(unlink(plink_keep_file, force = TRUE), add = TRUE)
+  if (isTRUE(all_fam_samples_retained)) {
+    plink_keep_file <- NULL
+  } else {
+    plink_keep_file <- tempfile("KnockoffPipeline_keep_", fileext = ".fam")
+    data.table::fwrite(plink_keep_fam, plink_keep_file, sep = "\t",
+                       col.names = FALSE)
+    on.exit(unlink(plink_keep_file, force = TRUE), add = TRUE)
+  }
+
+  # Detect the additive-export syntax once.  The block/batch workers reuse the
+  # resolved switch instead of spawning one `plink --version` process per
+  # export.  PLINK itself stays single-threaded because parallelism is managed
+  # by the outer R workers.
+  plink_export_switch <- .plink_additive_export_switch(plink_path)
+  plink_threads <- 1L
 
   # ---------------------------------------------------------------------------
   # 7.  Stage 1: knockoff generation only (no null model, no tests)
@@ -437,6 +428,8 @@ run_pipeline <- function(
 
   if (pipeline_stage == "stage1_knockoff") {
     message("\n======= Stage 1: Knockoff Generation =======")
+    rm(pheno, all_covar_cols)
+    gc()
     .run_knockoff_generation(
       test_type               = test_type,
       geno_file               = geno_file,
@@ -454,7 +447,10 @@ run_pipeline <- function(
       user_cores              = user_cores,
       read_mid_exist          = read_mid_exist,
       plink_keep_file         = plink_keep_file,
-      ld_block_file           = ld_block_file
+      ld_block_file           = ld_block_file,
+      export_switch           = plink_export_switch,
+      plink_threads           = plink_threads,
+      temp_dir                = temp_dir
     )
     message("\nStage 1 complete.")
     message("  Knockoffs : ", knockoff_dir)
@@ -595,7 +591,10 @@ run_pipeline <- function(
         save_knockoff           = ko_save,
         load_knockoff           = ko_load,
         knockoff_dir            = knockoff_dir,
-        knockoff_sample_ids     = knockoff_sample_ids
+        knockoff_sample_ids     = knockoff_sample_ids,
+        export_switch           = plink_export_switch,
+        plink_threads           = plink_threads,
+        temp_dir                = temp_dir
       )
 
     } else {
@@ -623,7 +622,10 @@ run_pipeline <- function(
         knockoff_dir            = knockoff_dir,
         knockoff_sample_ids     = knockoff_sample_ids,
         sparseSigma             = if (!sample_uncorrelated) nullobj$sparseSigma else NULL,
-        ratio                   = if (!sample_uncorrelated) nullobj$ratio       else NULL
+        ratio                   = if (!sample_uncorrelated) nullobj$ratio       else NULL,
+        export_switch           = plink_export_switch,
+        plink_threads           = plink_threads,
+        temp_dir                = temp_dir
       )
     }
 
@@ -807,7 +809,9 @@ run_pipeline <- function(
   n_markers_grm, fdr, sources
 ) {
   list(
-    schema_version = 1L,
+    # Version 2 invalidates checkpoints written before the corrected Single
+    # MAC alignment and gene knockoff skip-index logic.
+    schema_version = 2L,
     test_type = as.character(test_type),
     phenotype = as.character(phenotype),
     sample_ids = as.character(sample_ids),
@@ -897,7 +901,8 @@ run_pipeline <- function(
   test_type, geno_file, Gsub.id, knockoff_dir, chr_vector,
   M, seed, genome_build, sliding_window_length, geno_missing_imputation,
   plink_path, batch_size, sample_uncorrelated, user_cores, read_mid_exist,
-  plink_keep_file, ld_block_file
+  plink_keep_file, ld_block_file, export_switch = NULL, plink_threads = 1L,
+  temp_dir = NULL
 ) {
   # A minimal "null object" is not needed here: run_single_block /
   # run_batch_gene accept save_knockoff = TRUE without running tests.
@@ -938,6 +943,9 @@ run_pipeline <- function(
           genome_build            = genome_build,
           reference_id            = reference_id,
           plink_keep_file         = plink_keep_file,
+          export_switch           = export_switch,
+          plink_threads           = plink_threads,
+          temp_dir                = temp_dir,
           knockoff_seed           = .derive_unit_seed(
             seed, "Single_Window", c, kk
           ),
@@ -958,6 +966,7 @@ run_pipeline <- function(
     # Gene_Centric
     gene_file <- .gene_annotation_path(genome_build)
     if (!file.exists(gene_file)) stop("Gene annotation file not found: ", gene_file)
+    reference_id <- .reference_file_id(gene_file)
 
     genes_info <- data.table::fread(gene_file)
     genes_info$chr <- as.numeric(gsub("[^0-9]", "", genes_info$chr))
@@ -992,7 +1001,10 @@ run_pipeline <- function(
           Gsub.id             = Gsub.id,
           bim_metadata        = bim_chr,
           plink_keep_file     = plink_keep_file,
-          reference_id        = .reference_file_id(gene_file),
+          reference_id        = reference_id,
+          export_switch       = export_switch,
+          plink_threads       = plink_threads,
+          temp_dir            = temp_dir,
           seed                = seed,
           use_glmm            = !sample_uncorrelated,
           abc_df              = abc_df,
@@ -1058,16 +1070,25 @@ run_pipeline <- function(
 #' @keywords internal
 .write_block_result <- function(mid_dir, chr, kk, single_df, window_df) {
   d <- .ensure_block_dir(mid_dir, chr)
-  if (!is.null(single_df) && nrow(single_df) > 0L) {
+  has_single <- !is.null(single_df) && nrow(single_df) > 0L
+  has_window <- !is.null(window_df) && nrow(window_df) > 0L
+  if (has_single) {
     data.table::fwrite(single_df,
       file.path(d, sprintf("Single_block_%04d.txt", kk)), sep = "\t")
   }
-  if (!is.null(window_df) && nrow(window_df) > 0L) {
+  if (has_window) {
     data.table::fwrite(window_df,
       file.path(d, sprintf("Window_block_%04d.txt", kk)), sep = "\t")
   }
   # Always write progress marker (even for empty blocks)
   .mark_block_done(mid_dir, chr, kk)
+  invisible(structure(
+    list(
+      chr = as.integer(chr), block = as.integer(kk),
+      empty = !has_single && !has_window
+    ),
+    class = "knockoff_pipeline_block_status"
+  ))
 }
 
 #' Write a progress marker for a completed block
@@ -1085,6 +1106,8 @@ run_pipeline <- function(
                              full.names = TRUE)
   window_files <- list.files(d, pattern = "^Window_block_\\d+\\.txt$",
                              full.names = TRUE)
+  single_chr <- NULL
+  window_chr <- NULL
 
   if (length(single_files) > 0L) {
     single_chr <- data.table::rbindlist(
@@ -1104,6 +1127,7 @@ run_pipeline <- function(
     message("  Merged ", length(window_files),
             " per-block Window files for chr ", chr)
   }
+  invisible(list(single = single_chr, window = window_chr))
 }
 
 #' Read completed gene IDs from the progress file
@@ -1161,6 +1185,7 @@ run_pipeline <- function(
     file.path(mid_dir, paste0("GeneCentric_mid_results_chr", chr, ".txt")),
     sep = "\t")
   message("  Merged ", length(batch_files), " per-batch files for chr ", chr)
+  invisible(result_chr)
 }
 
 
@@ -1173,7 +1198,8 @@ run_pipeline <- function(
   ld_block_file, plink_keep_file,
   sliding_window_length, geno_missing_imputation, plink_path, M, seed,
   user_cores, read_mid_exist, fdr,
-  save_knockoff, load_knockoff, knockoff_dir, knockoff_sample_ids
+  save_knockoff, load_knockoff, knockoff_dir, knockoff_sample_ids,
+  export_switch = NULL, plink_threads = 1L, temp_dir = NULL
 ) {
   block_file <- .resolve_ld_block_file(genome_build, ld_block_file)
   reference_id <- .reference_file_id(block_file)
@@ -1181,6 +1207,8 @@ run_pipeline <- function(
   blocks     <- data.table::fread(block_file)
   unique_chr <- intersect(sort(unique(blocks$chr)), chr_vector)
   if (length(unique_chr) == 0L) stop("No chromosomes remain after intersecting block file.")
+  last_chr <- utils::tail(unique_chr, 1L)
+  last_merge <- list(single = NULL, window = NULL)
 
   for (c in unique_chr) {
     message("--- chr ", c, " (Single_Window) ---")
@@ -1213,7 +1241,11 @@ run_pipeline <- function(
 
     if (length(pending_blocks) == 0L) {
       message("  All blocks already completed for chr ", c)
-      .merge_per_block_files(mid_dir, c)
+      if (identical(c, last_chr)) {
+        last_merge <- .merge_per_block_files(mid_dir, c)
+      } else {
+        .merge_per_block_files(mid_dir, c)
+      }
       next
     }
 
@@ -1240,6 +1272,9 @@ run_pipeline <- function(
           genome_build            = genome_build,
           reference_id            = reference_id,
           plink_keep_file         = plink_keep_file,
+          export_switch           = export_switch,
+          plink_threads           = plink_threads,
+          temp_dir                = temp_dir,
           knockoff_seed           = .derive_unit_seed(
             seed, "Single_Window", c, kk
           ),
@@ -1251,14 +1286,15 @@ run_pipeline <- function(
         )
         # Write per-block results IMMEDIATELY (different file per block = safe).
         # The helper also records a done marker for a valid empty block.
-        .write_block_result(
+        status <- .write_block_result(
           mid_dir, c, kk,
           if (is.null(res)) NULL else
             data.table::as.data.table(res$result.single),
           if (is.null(res)) NULL else
             data.table::as.data.table(res$result.window)
         )
-        res
+        rm(res)
+        status
       }, error = function(e) {
         structure(
           list(chr = c, block = kk, message = conditionMessage(e)),
@@ -1267,33 +1303,65 @@ run_pipeline <- function(
       })
     }, mc.cores = user_cores)
 
-    failed <- vapply(out, inherits, logical(1),
-                     what = "knockoff_pipeline_block_error")
+    failed <- vapply(out, function(x) {
+      inherits(x, "knockoff_pipeline_block_error") ||
+        inherits(x, "try-error")
+    }, logical(1))
     if (any(failed)) {
       messages <- vapply(out[failed], function(x) {
-        paste0("chr", x$chr, " block ", x$block, ": ", x$message)
+        if (inherits(x, "knockoff_pipeline_block_error")) {
+          paste0("chr", x$chr, " block ", x$block, ": ", x$message)
+        } else {
+          as.character(x)
+        }
       }, character(1))
       stop("Single_Window block failure(s): ", paste(messages, collapse = "; "))
     }
-    out <- Filter(Negate(is.null), out)
-    if (length(out) == 0L) { warning("All blocks failed for chr ", c, " -- skipping."); next }
+    valid_status <- vapply(
+      out, inherits, logical(1), what = "knockoff_pipeline_block_status"
+    )
+    if (!all(valid_status))
+      stop("Single_Window worker returned an invalid completion status for chr ", c, ".")
+    n_empty <- sum(vapply(out, `[[`, logical(1), "empty"))
+    if (n_empty > 0L)
+      message("  ", n_empty, " completed block(s) contained no testable variants")
 
     # Merge per-block files into chromosome-level files (backward compat)
-    .merge_per_block_files(mid_dir, c)
+    if (identical(c, last_chr)) {
+      last_merge <- .merge_per_block_files(mid_dir, c)
+    } else {
+      .merge_per_block_files(mid_dir, c)
+    }
     rm(out); gc()
   }
 
   # ---- Merge and summarise -------------------------------------------------
   message("Merging intermediate results ...")
 
-  read_mid <- function(prefix, chr) {
+  read_mid <- function(chr, prefix) {
+    cache_key <- if (identical(prefix, "Single")) "single" else "window"
+    if (identical(chr, last_chr) && !is.null(last_merge[[cache_key]]))
+      return(last_merge[[cache_key]])
     f <- file.path(mid_dir, paste0(prefix, "_mid_results_chr", chr, ".txt"))
     if (!file.exists(f)) { warning("Missing intermediate file: ", f); return(NULL) }
     data.table::fread(f)
   }
 
-  result.single.all <- data.table::rbindlist(lapply(unique_chr, read_mid, prefix = "Single"), fill = TRUE)
-  result.window.all <- data.table::rbindlist(lapply(unique_chr, read_mid, prefix = "Window"), fill = TRUE)
+  collect_mid <- function(prefix) {
+    parts <- Filter(
+      Negate(is.null), lapply(unique_chr, read_mid, prefix = prefix)
+    )
+    if (length(parts) == 0L) return(data.table::data.table())
+    if (length(parts) == 1L) return(parts[[1L]])
+    data.table::rbindlist(parts, fill = TRUE)
+  }
+
+  result.single.all <- collect_mid("Single")
+  # Once the Single table has been collected, do not retain its cached merge
+  # while collecting the Window table.
+  last_merge$single <- NULL
+  result.window.all <- collect_mid("Window")
+  rm(last_merge)
 
   if (nrow(result.single.all) == 0L || nrow(result.window.all) == 0L)
     stop("No results across all chromosomes. Check intermediate files in: ", mid_dir)
@@ -1326,16 +1394,20 @@ run_pipeline <- function(
   sliding_window_length, plink_path, M, seed, user_cores, read_mid_exist, fdr,
   batch_size, sample_uncorrelated,
   save_knockoff, load_knockoff, knockoff_dir, knockoff_sample_ids,
-  sparseSigma, ratio
+  sparseSigma, ratio, export_switch = NULL, plink_threads = 1L,
+  temp_dir = NULL
 ) {
   gene_file <- .gene_annotation_path(genome_build)
   if (!file.exists(gene_file)) stop("Gene annotation file not found: ", gene_file)
+  reference_id <- .reference_file_id(gene_file)
 
   genes_info <- data.table::fread(gene_file)
   genes_info$chr <- as.numeric(gsub("[^0-9]", "", genes_info$chr))
   genes_info      <- genes_info[!is.na(chr)]
   unique_chr      <- intersect(sort(unique(genes_info$chr)), chr_vector)
   if (length(unique_chr) == 0L) stop("No chromosomes remain.")
+  last_chr <- utils::tail(unique_chr, 1L)
+  last_merge <- NULL
 
   for (c in unique_chr) {
     message("--- chr ", c, " (Gene_Centric) ---")
@@ -1373,7 +1445,11 @@ run_pipeline <- function(
     # All genes done -- just ensure chromosome-level file is in place
     if (nrow(chr_genes) == 0L) {
       message("  All genes already completed for chr ", c)
-      .merge_batch_files(mid_dir, c)
+      if (identical(c, last_chr)) {
+        last_merge <- .merge_batch_files(mid_dir, c)
+      } else {
+        .merge_batch_files(mid_dir, c)
+      }
       next
     }
 
@@ -1400,7 +1476,10 @@ run_pipeline <- function(
         Gsub.id             = Gsub.id,
         bim_metadata        = bim_chr,
         plink_keep_file     = plink_keep_file,
-        reference_id        = .reference_file_id(gene_file),
+        reference_id        = reference_id,
+        export_switch       = export_switch,
+        plink_threads       = plink_threads,
+        temp_dir            = temp_dir,
         seed                = seed,
         use_glmm            = !sample_uncorrelated,
         abc_df              = abc_df,
@@ -1428,18 +1507,30 @@ run_pipeline <- function(
     }
 
     # Merge per-batch files into chromosome-level file (backward compat)
-    .merge_batch_files(mid_dir, c)
+    if (identical(c, last_chr)) {
+      last_merge <- .merge_batch_files(mid_dir, c)
+    } else {
+      .merge_batch_files(mid_dir, c)
+    }
   }
 
   # ---- Merge and summarise -------------------------------------------------
-  result.all <- data.table::rbindlist(
-    lapply(unique_chr, function(c) {
+  gene_parts <- Filter(
+    Negate(is.null), lapply(unique_chr, function(c) {
+      if (identical(c, last_chr) && !is.null(last_merge)) return(last_merge)
       f <- file.path(mid_dir, paste0("GeneCentric_mid_results_chr", c, ".txt"))
       if (!file.exists(f)) { warning("Missing intermediate file: ", f); return(NULL) }
       data.table::fread(f)
-    }),
-    fill = TRUE
+    })
   )
+  if (length(gene_parts) == 0L) {
+    result.all <- data.table::data.table()
+  } else if (length(gene_parts) == 1L) {
+    result.all <- gene_parts[[1L]]
+  } else {
+    result.all <- data.table::rbindlist(gene_parts, fill = TRUE)
+  }
+  rm(gene_parts, last_merge)
   if (nrow(result.all) == 0L)
     stop("No gene-centric results. Check intermediate files in: ", mid_dir)
 

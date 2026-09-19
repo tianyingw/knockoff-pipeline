@@ -71,6 +71,19 @@ test_that("stage 1 persists and stage 2 always loads without cleanup", {
 })
 
 
+test_that("stage 1 requires phenotype inputs to define complete cases", {
+  expect_error(
+    run_pipeline(
+      outdir = tempfile("stage1-missing-phenotype-"),
+      test_type = "Single_Window",
+      geno_file = tempfile("missing-plink-"),
+      pipeline_stage = "stage1_knockoff"
+    ),
+    "pheno_file.*required for every pipeline stage"
+  )
+})
+
+
 test_that("directory preparation distinguishes new and existing paths", {
   new_dir <- tempfile("knockoff-new-")
   missing_dir <- tempfile("knockoff-missing-")

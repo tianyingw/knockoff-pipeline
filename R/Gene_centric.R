@@ -1,6 +1,7 @@
 # run_batch_gene -------------------------------------------------------------
 # New params vs original: save_knockoff, load_knockoff, knockoff_dir,
-#   knockoff_sample_ids, stage1_only, read_mid_exist.
+#   knockoff_sample_ids, stage1_only, read_mid_exist, export_switch,
+#   plink_threads, temp_dir.
 #
 # knockoff_dir is the chr-level subdirectory (e.g. <knockoff_root>/chr1/).
 # One RDS file per gene is written there for the gene_buffer knockoff only.
@@ -32,10 +33,16 @@ run_batch_gene <- function(
   knockoff_dir        = NULL,       # chr-level subdir, e.g. <root>/chr1
   knockoff_sample_ids = NULL,
   stage1_only         = FALSE,
-  read_mid_exist      = TRUE
+  read_mid_exist      = TRUE,
+  export_switch       = NULL,
+  plink_threads       = NULL,
+  temp_dir            = NULL
 ) {
   kk_vec <- batch_index[[b]]
-  tmpdir <- tempdir()
+  tmpdir <- if (is.null(temp_dir)) tempdir() else temp_dir
+  if (!dir.exists(tmpdir) &&
+      !dir.create(tmpdir, recursive = TRUE, showWarnings = FALSE))
+    stop("Unable to create temporary directory: ", tmpdir)
   chr    <- as.numeric(gsub("chr", "", genes[kk_vec[1], chr]))
 
   gene_buffer_extension <- 5000 + 50000
@@ -48,15 +55,19 @@ run_batch_gene <- function(
   # Skip that empty analysis unit before PLINK turns it into a no-output error.
   if (nrow(batch_bim) == 0L) return(NULL)
 
-  batch_prefix <- file.path(tmpdir, sprintf("temp_chr%d_batch_%d_%d",
-                                            chr, min(kk_vec), max(kk_vec)))
+  batch_prefix <- tempfile(
+    sprintf("KnockoffPipeline_chr%d_batch_%d_%d_",
+            chr, min(kk_vec), max(kk_vec)),
+    tmpdir = tmpdir
+  )
 
   keep_arg <- if (is.null(plink_keep_file)) "" else
     paste("--keep", shQuote(plink_keep_file))
   status <- .run_plink_additive_export(
     plink_prefix = plink_prefix, geno_file = geno.file, chr = chr,
     start = start_all, stop = end_all, keep_arg = keep_arg,
-    out_prefix = batch_prefix
+    out_prefix = batch_prefix, export_switch = export_switch,
+    plink_threads = plink_threads
   )
   if (!identical(status, 0L))
     stop("PLINK failed while exporting chr", chr, ":", start_all, "-", end_all, ".")
@@ -111,8 +122,6 @@ run_batch_gene <- function(
       idx_gene_surround <- which(variants_batch >= gene_start-gene_buffer_extension & variants_batch <= gene_end+gene_buffer_extension)
       
       if (length(idx_gene_buffer) <= 1) return(NULL)
-      print(paste0("Gene ", gene_id, ": ", length(idx_gene_buffer), " SNPs in buffer region, ", length(idx_gene_surround), " SNPs in surrounding region."))
-
       G_gene          <- G_batch[, idx_gene_surround, drop = FALSE]
       variant_metadata_gene <- variant_metadata_batch[
         idx_gene_surround, , drop = FALSE

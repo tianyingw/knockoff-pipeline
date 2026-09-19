@@ -143,13 +143,13 @@ run_pipeline(
 | `outdir`     | Output directory (created automatically if absent)       |
 | `test_type`  | `"Single_Window"` or `"Gene_Centric"`                   |
 | `geno_file`  | PLINK genotype file prefix (`.bed/.bim/.fam`)            |
+| `pheno_file` | Phenotype file (CSV/TSV), required for every stage        |
+| `phenotype`  | Phenotype column name(s), required for every stage        |
 
 ### Optional
 
 | Argument                  | Description                                                                                      | Default               |
 |---------------------------|--------------------------------------------------------------------------------------------------|-----------------------|
-| `pheno_file`              | Phenotype file (CSV/TSV). Optional for `pipeline_stage = "stage1_knockoff"`; required otherwise | `NULL`                |
-| `phenotype`               | Column name(s) of phenotype(s). Optional for `pipeline_stage = "stage1_knockoff"`               | `NULL`                |
 | `pheno_id`                | Column name of sample ID in phenotype file                                                       | `NULL`                |
 | `covar_cols`              | Continuous covariate column names                                                                | `NULL`                |
 | `cat_covar_cols`          | Categorical covariate column names                                                               | `NULL`                |
@@ -173,6 +173,7 @@ run_pipeline(
 | **`pipeline_stage`**      | `"full"`, `"stage1_knockoff"`, or `"stage2_analysis"` — see below                              | `"full"`              |
 | **`save_knockoff`**       | Whether to retain the knockoff directory after the run completes                                 | `NULL`                |
 | **`knockoff_dir`**        | Directory for saved knockoff manifests and matrix files (defaults to `<outdir>/knockoffs`)       | `NULL`                |
+| **`temp_dir`**            | Node-local directory for temporary PLINK exports; prefers `SLURM_TMPDIR` when unset              | `NULL`                |
 
 ---
 
@@ -224,7 +225,8 @@ any saved matrix is accepted:
 - Sample IDs are kept as strings, so alphabetic IDs and leading zeros are not
   lost. Saved rows may be reordered, but the saved and current sample-ID sets
   must match exactly. A mismatch errors rather than silently changing the
-  analysis population; prepare the final analysis subset before stage 1.
+  analysis population. Stage 1 applies the same phenotype/covariate
+  complete-case and PLINK-ID matching rules as downstream analysis.
 - The ordered variant fingerprint contains chromosome, BIM variant ID, BIM base
   position, both alleles, and the coded allele. Equal column counts are not
   sufficient: a change in variant identity, order, position, or allele is an
@@ -251,12 +253,12 @@ files and fails closed if the saved set is incomplete or incompatible.
 
 ### Two-Stage Workflow (`pipeline_stage`)
 
-The pipeline can be split into two independent stages, useful when knockoff generation and association testing need to run in separate jobs (e.g., on a cluster), or when the same knockoffs will be reused with multiple phenotype files that are not yet available.
+The pipeline can be split into two independent stages, useful when knockoff generation and association testing need to run in separate jobs (e.g., on a cluster). Stage 1 requires the phenotype and covariate specification so that it generates knockoffs for the exact downstream complete-case sample set.
 
 | `pipeline_stage`       | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
 | `"full"` (default)     | Complete end-to-end pipeline                                                 |
-| `"stage1_knockoff"`    | Generate knockoffs only; write sample list; no association testing           |
+| `"stage1_knockoff"`    | Form the complete-case sample set, generate knockoffs, and write its sample list; no null-model fitting or association testing |
 | `"stage2_analysis"`    | Load saved knockoffs; fit null models; run association tests; never delete the supplied knockoff directory |
 
 **Stage 1:**
@@ -265,7 +267,11 @@ The pipeline can be split into two independent stages, useful when knockoff gene
 run_pipeline(
   outdir         = "results/",
   test_type      = "Gene_Centric",
+  pheno_file     = "data/pheno_AD.csv",
   geno_file      = "data/geno",
+  phenotype      = "AD",
+  pheno_id       = "IID",
+  covar_cols     = c("age", "PC1"),
   pipeline_stage = "stage1_knockoff",
   knockoff_dir   = "results/knockoffs",
   seed           = 20260915L
@@ -275,7 +281,7 @@ run_pipeline(
 #   results/knockoffs/knockoff_sample_list.txt
 ```
 
-**Stage 2** (can use a completely different phenotype file):
+**Stage 2** (the resulting complete-case IID set must match Stage 1):
 
 ```R
 run_pipeline(
@@ -284,6 +290,8 @@ run_pipeline(
   pheno_file     = "data/pheno_AD.csv",
   geno_file      = "data/geno",
   phenotype      = "AD",
+  pheno_id       = "IID",
+  covar_cols     = c("age", "PC1"),
   pipeline_stage = "stage2_analysis",
   knockoff_dir   = "results/knockoffs",  # same knockoffs from stage 1
   seed           = 20260915L
@@ -291,9 +299,9 @@ run_pipeline(
 ```
 
 Stage 2 reads `knockoff_sample_list.txt`, requires the same character-ID set,
-and reindexes rows if only their order differs. If phenotype missingness changes
-the analysis set, create that exact PLINK subset before stage 1 and regenerate
-the knockoffs.
+and reindexes rows if only their order differs. If a different phenotype or
+covariate specification changes the complete-case set, run Stage 1 again in a
+new knockoff directory.
 
 ---
 

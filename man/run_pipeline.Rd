@@ -32,7 +32,8 @@ run_pipeline(
   read_mid_exist = TRUE,
   pipeline_stage = "full",
   save_knockoff = NULL,
-  knockoff_dir = NULL
+  knockoff_dir = NULL,
+  temp_dir = NULL
 )
 }
 \arguments{
@@ -43,12 +44,11 @@ run_pipeline(
 
 \item{geno_file}{Character. PLINK genotype file prefix (no extension).}
 
-\item{pheno_file}{Character or \code{NULL}. Path to the phenotype file
-(tab- or comma-separated). Optional when
-\code{pipeline_stage = "stage1_knockoff"}; required otherwise.}
+\item{pheno_file}{Character. Path to the phenotype file
+(tab- or comma-separated). Required for every pipeline stage so stage 1
+and downstream analysis use the same complete-case sample set.}
 
-\item{phenotype}{Character \strong{vector} of phenotype column name(s),
-or \code{NULL} when \code{pipeline_stage = "stage1_knockoff"}.
+\item{phenotype}{Character \strong{vector} of phenotype column name(s).
 When multiple phenotypes are provided, samples with missing values in
 \emph{any} phenotype or covariate are removed once before any analysis.
 Reusable knockoffs are generated and persisted internally on the first pass:
@@ -132,8 +132,9 @@ Default \code{TRUE}.}
 \describe{
 \item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
 \item{\code{"stage1_knockoff"}}{Generate and save knockoffs only; no
-association testing. Writes a sample-list file for reproducibility.
-Implies \code{save_knockoff = TRUE}.}
+association testing. First applies the same phenotype/covariate complete-case
+and PLINK-ID matching rules as a full run, then writes a sample-list file for
+reproducibility. Implies \code{save_knockoff = TRUE}.}
 \item{\code{"stage2_analysis"}}{Load pre-generated knockoffs and run
 association testing only. Requires \code{knockoff_dir}. The saved and current
 character-IID sets must match exactly, although row order may differ;
@@ -157,6 +158,11 @@ and never deletes it.}
 \code{.rds} files.  Defaults to \code{<outdir>/knockoffs}.  Must be
 provided (and populated) when \code{pipeline_stage =
   "stage2_analysis"}.}
+
+\item{temp_dir}{Character or \code{NULL}. Directory for temporary PLINK
+exports. When \code{NULL}, a writable \code{SLURM_TMPDIR} is preferred and
+R's \code{tempdir()} is used otherwise. On clusters, choose node-local scratch
+rather than a shared output directory to avoid parallel I/O contention.}
 }
 \value{
 Invisibly returns \code{TRUE} on success.
@@ -187,7 +193,8 @@ files.
 Sample IDs are treated as character strings, preserving alphabetic IDs and
 leading zeros. Saved rows may be reordered, but the saved and current sample-ID
 sets must match exactly. A mismatch errors rather than silently changing the
-analysis population; prepare the final analysis subset before stage 1.
+analysis population. Stage 1 applies the same phenotype/covariate complete-case
+and PLINK-ID matching rules as downstream analysis.
 
 Before reuse, the ordered variant fingerprint is compared exactly. It
 contains chromosome, BIM variant ID, BIM base position, both alleles, and the
@@ -207,10 +214,11 @@ mismatch fail closed. Setting \code{read_mid_exist = FALSE} starts fresh by
 replacing only the analysis-specific \code{mid} directory.
 
 \strong{Two-stage workflow.}
-Run stage 1 to pre-generate knockoffs, then run stage 2 with a phenotype
-measured on that same analysis sample set. Stage 2 reads the sample list
-produced by stage 1, requires an exact character-IID set match, and reindexes
-rows if their order differs.
+Run stage 1 with the phenotype(s) and covariates that define the analysis
+complete cases, then run stage 2 with the same resulting sample set. Stage 1
+uses these columns only to establish the sample set and does not fit a null
+model. Stage 2 reads the saved sample list, requires an exact character-IID
+set match, and reindexes rows if their order differs.
 
 \strong{Multiple phenotypes.}
 Supply a character vector. Samples with missing values in \emph{any}

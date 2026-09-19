@@ -16,6 +16,21 @@ test_that("analysis checkpoint is created and an identical run can resume", {
 })
 
 
+test_that("generated analysis contexts use the current algorithm schema", {
+  context <- KnockoffPipeline:::.make_analysis_checkpoint_context(
+    test_type = "Single_Window", phenotype = "Y", sample_ids = "sample-1",
+    pheno_id = "IID", covar_cols = character(),
+    cat_covar_cols = character(), out_type = "C", M = 5L, seed = 17L,
+    genome_build = "hg19", sliding_window_length = c(1000, 5000),
+    geno_missing_imputation = "fixed", sample_uncorrelated = TRUE,
+    relatedness_cutoff = 0.125, n_markers_grm = 1000L, fdr = 0.1,
+    sources = list()
+  )
+
+  expect_identical(context$schema_version, 2L)
+})
+
+
 test_that("incompatible and legacy checkpoints fail closed", {
   incompatible <- tempfile("checkpoint-incompatible-")
   legacy <- tempfile("checkpoint-legacy-")
