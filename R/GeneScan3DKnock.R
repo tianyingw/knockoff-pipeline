@@ -556,9 +556,9 @@ GeneScan3D<-function(G=G_gene_buffer,Z=Z_gene_buffer,G.promoter=G_promoter,Z.pro
          
          if(!is.null(Z.EnhancerAll)){
             if (r==1){
-               Z.Enhancer=Z.EnhancerAll[1:cumsum(p_Enhancer)[r],]
+               Z.Enhancer=Z.EnhancerAll[1:cumsum(p_Enhancer)[r],,drop=FALSE]
             }else{
-               Z.Enhancer=Z.EnhancerAll[(cumsum(p_Enhancer)[r-1]+1):cumsum(p_Enhancer)[r],]
+               Z.Enhancer=Z.EnhancerAll[(cumsum(p_Enhancer)[r-1]+1):cumsum(p_Enhancer)[r],,drop=FALSE]
             }
          }else{
             Z.Enhancer=NULL
@@ -586,7 +586,9 @@ GeneScan3D<-function(G=G_gene_buffer,Z=Z_gene_buffer,G.promoter=G_promoter,Z.pro
          SNP.index.Enhancer<-which(MAF.Enhancer>0 & s.Enhancer!=0 & !is.na(MAF.Enhancer)) 
          
          G.Enhancer<-Matrix(G.Enhancer[,SNP.index.Enhancer])
-         if(!is.null(Z.Enhancer)){Z.Enhancer<-Matrix(Z.Enhancer[SNP.index.Enhancer,])}
+         if(!is.null(Z.Enhancer)){
+            Z.Enhancer<-Matrix(Z.Enhancer[SNP.index.Enhancer,,drop=FALSE])
+         }
          if(dim(G.Enhancer)[2]<1){
             Enhancer_ind[r]=FALSE
             next
@@ -621,7 +623,7 @@ GeneScan3D<-function(G=G_gene_buffer,Z=Z_gene_buffer,G.promoter=G_promoter,Z.pro
 
             S.Enhancer=t(G.window.Enhancer)%*%Y.res
             #SPA gene-based tests
-            if(outcome=='D'){ 
+            if(outcome=='D' && length(p.single.Enhancer)>1){
                V=diag(K)
                #adjusted variance
                # print(str(V))
@@ -1038,7 +1040,11 @@ GeneScan3D.KnockoffGeneration <- function(
     variants_gene_buffer_surround_filter <= gene_buffer.pos[2] &
     variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
   ]
-  if (length(positions_gene_buffer) == 0) return(NULL)
+  if (length(positions_gene_buffer) <= 1L) {
+    warning("Gene buffer has <=1 target variant after GeneScan3DKnock QC; skipping gene.",
+            call. = FALSE)
+    return(NULL)
+  }
   current_context <- if (isTRUE(save_knockoff) || isTRUE(load_knockoff)) {
     .make_knockoff_context(
       test_type = "Gene_Centric_GLM",
@@ -1098,7 +1104,9 @@ GeneScan3D.KnockoffGeneration <- function(
       positions_gene_buffer <= promoter.pos[2] &
       positions_gene_buffer >= promoter.pos[1]
     ]
-    G_promoter <- G_gene_buffer[, positions_gene_buffer %in% positions_promoter]
+    G_promoter <- G_gene_buffer[,
+      positions_gene_buffer %in% positions_promoter, drop = FALSE
+    ]
   }
 
   # Functional annotations
@@ -1108,7 +1116,9 @@ GeneScan3D.KnockoffGeneration <- function(
       variants_gene_buffer_surround <= gene_buffer.pos[2] &
       variants_gene_buffer_surround >= gene_buffer.pos[1]
     ]
-    Z_gene_buffer <- as.matrix(Z[pos_gb_nf %in% positions_gene_buffer, ])
+    Z_gene_buffer <- as.matrix(
+      Z[pos_gb_nf %in% positions_gene_buffer, , drop = FALSE]
+    )
   }
   Z_promoter <- NULL
   if (!is.null(Z.promoter) && !is.null(promoter.pos)) {
@@ -1116,20 +1126,24 @@ GeneScan3D.KnockoffGeneration <- function(
       variants_gene_buffer_surround <= promoter.pos[2] &
       variants_gene_buffer_surround >= promoter.pos[1]
     ]
-    Z_promoter <- as.matrix(Z.promoter[pos_pr_nf %in% positions_promoter, ])
+    Z_promoter <- as.matrix(
+      Z.promoter[pos_pr_nf %in% positions_promoter, , drop = FALSE]
+    )
   }
 
   # ---- Stage 1: done after saving knockoff --------------------------------
   if (isTRUE(stage1_only)) return(invisible(NULL))
 
   # ---- R enhancers (always generated fresh — not saved) -------------------
-  G_EnhancerAll          <- c()
-  p_EnhancerAll_out      <- c()
-  Z_EnhancerAll_out      <- c()
-  G_EnhancerAll_knockoff <- c()
+  G_EnhancerAll          <- NULL
+  p_EnhancerAll_out      <- integer(0)
+  Z_EnhancerAll_out      <- NULL
+  G_EnhancerAll_knockoff <- NULL
+  R_input                <- R
+  R                      <- 0L
 
-  if (R != 0) {
-    for (r in seq_len(R)) {
+  if (R_input != 0) {
+    for (r in seq_len(R_input)) {
       if (r == 1) {
         G_Enh_surround   <- G_EnhancerAll_surround[,
           seq_len(cumsum(p_EnhancerAll_surround)[r]), drop = FALSE]
@@ -1174,6 +1188,17 @@ GeneScan3D.KnockoffGeneration <- function(
       G_Enh_surround <- Matrix::Matrix(G_Enh_surround[, SNP.index])
       pos_Enh_filter <- pos_Enh_surround[SNP.index]
       colnames(G_Enh_surround) <- extract_position_universal(colnames(G_Enh_surround))
+      positions_enhancer <- pos_Enh_filter[
+        pos_Enh_filter <= Enhancer.pos[r, 2] &
+        pos_Enh_filter >= Enhancer.pos[r, 1]
+      ]
+      if (length(positions_enhancer) == 0L) {
+        warning(sprintf(
+          "Enhancer %d: no target variant after GeneScan3DKnock QC; skipping.",
+          r
+        ), call. = FALSE)
+        next
+      }
 
       # Generate enhancer knockoff fresh (NOT saved)
       # BUG FIX: was create.MK.AL_Enhancer(..., M=5) — hardcoded
@@ -1197,29 +1222,34 @@ GeneScan3D.KnockoffGeneration <- function(
         }
       )
 
-      positions_enhancer <- pos_Enh_filter[
-        pos_Enh_filter <= Enhancer.pos[r, 2] &
-        pos_Enh_filter >= Enhancer.pos[r, 1]
-      ]
       G_enhancer             <- Matrix::Matrix(
         G_Enh_surround[, pos_Enh_filter %in% positions_enhancer])
-      G_EnhancerAll          <- cbind(G_EnhancerAll, G_enhancer)
+      G_EnhancerAll          <- if (is.null(G_EnhancerAll)) G_enhancer else
+        cbind(G_EnhancerAll, G_enhancer)
       p_EnhancerAll_out      <- c(p_EnhancerAll_out, length(positions_enhancer))
-      G_EnhancerAll_knockoff <- abind::abind(G_EnhancerAll_knockoff, G_Enh_knockoff)
+      G_EnhancerAll_knockoff <- if (is.null(G_EnhancerAll_knockoff)) {
+        G_Enh_knockoff
+      } else {
+        abind::abind(G_EnhancerAll_knockoff, G_Enh_knockoff, along = 3L)
+      }
+      R <- R + 1L
 
       # Functional annotation
       if (!is.null(Z.EnhancerAll)) {
         if (r == 1) {
-          Z_Enh <- as.matrix(Z.EnhancerAll[seq_len(cumsum(p.EnhancerAll)[r]), ])
+          Z_Enh <- as.matrix(
+            Z.EnhancerAll[seq_len(cumsum(p.EnhancerAll)[r]), , drop = FALSE]
+          )
         } else {
           Z_Enh <- as.matrix(Z.EnhancerAll[
-            (cumsum(p.EnhancerAll)[r - 1] + 1):cumsum(p.EnhancerAll)[r], ])
+            (cumsum(p.EnhancerAll)[r - 1] + 1):cumsum(p.EnhancerAll)[r],
+            , drop = FALSE])
         }
         Z_Enh <- as.matrix(Z_Enh[
           pos_Enh_surround[
             pos_Enh_surround <= Enhancer.pos[r, 2] &
             pos_Enh_surround >= Enhancer.pos[r, 1]
-          ] %in% positions_enhancer, ])
+          ] %in% positions_enhancer, , drop = FALSE])
         Z_EnhancerAll_out <- rbind(Z_EnhancerAll_out, Z_Enh)
       }
     }
@@ -1248,7 +1278,8 @@ GeneScan3D.KnockoffGeneration <- function(
     G_gbk              <- G_gene_buffer_knockoff[k, , ]
     G_prom_k           <- NULL
     if (!is.null(promoter.pos))
-      G_prom_k <- G_gbk[, positions_gene_buffer %in% positions_promoter]
+      G_prom_k <- G_gbk[, positions_gene_buffer %in% positions_promoter,
+                        drop = FALSE]
 
     GeneScan3D.Cauchy_knockoff[k, ] <- GeneScan3D(
       G              = G_gbk,
@@ -1256,7 +1287,9 @@ GeneScan3D.KnockoffGeneration <- function(
       G.promoter     = G_prom_k,
       Z.promoter     = Z_promoter,
       G.EnhancerAll  = if (R > 0 && length(G_EnhancerAll_knockoff) > 0)
-                         G_EnhancerAll_knockoff[k, , ] else NULL,
+        matrix(G_EnhancerAll_knockoff[k, , ],
+               nrow = nrow(G_gene_buffer),
+               ncol = sum(p_EnhancerAll_out)) else NULL,
       Z.EnhancerAll  = Z_EnhancerAll_out,
       R              = R,
       p_Enhancer     = p_EnhancerAll_out,
@@ -1302,37 +1335,27 @@ GeneScan3DKnock<-function(M=5,p0=GeneScan3DKnock.example$GeneScan3D.original,
    }
 
    p=cbind(p0,p_ko)
+   if (any(is.infinite(p)) || any(p < 0 | p > 1, na.rm = TRUE)) {
+      stop("All non-missing p-values must be finite and between 0 and 1.",
+           call. = FALSE)
+   }
    #calculate knockoff statistics W, kappa, tau for given original p-value and M knockoff p-values
-   T=-log10(p)
+   T=-log10(pmax(p,.Machine$double.xmin))
 
-   W=(T[,1]-apply(T[,2:(M+1)],1,median))*(T[,1]>=apply(T[,2:(M+1)],1,max))
-   kappa=apply(T,1,which.max)-1 #max T is from original data (0) or knockoff data (1 to 5)
-   tau=apply(T,1,max)-apply(T,1,function(x)median(x[-which.max(x)]))
+   stat=MK.statistic(T[,1],T[,2:(M+1),drop=FALSE],method='median')
+   kappa=stat[,'kappa']
+   tau=stat[,'tau']
+   W=tau*(kappa==0)
+   W[!is.finite(W)]=0
    Rej.Bound=10000
-   b=order(tau, kappa, decreasing=c(TRUE, FALSE))
-   c_0=kappa[b]==0  #only calculate q-value for kappa=0
-   #calculate ratios for top Rej.Bound tau values
-   ratio<-c();temp_0<-0
-   for(i in 1:length(b)){
-      temp_0<-temp_0+c_0[i]
-      temp_1<-i-temp_0
-      temp_ratio<-(1/M+1/M*temp_1)/max(1,temp_0)
-      ratio<-c(ratio,temp_ratio)
-      if(i>Rej.Bound){break}
-   }
-   #calculate q value for each gene/window
-   qvalue=rep(1,length(tau))
-   for(i in 1:length(b)){
-      qvalue[b[i]]=min(ratio[i:min(length(b),Rej.Bound)])*c_0[i]+1-c_0[i] #only calculate q-value for kappa=0, q-value for kappa!=0 is 1
-      if(i>Rej.Bound){break}
-   }
+   qvalue=MK.q.byStat(kappa,tau,M=M,Rej.Bound=Rej.Bound)
    #W statistics threshold
    W.threshold=MK.threshold.byStat(kappa,tau,M=M,fdr=fdr,Rej.Bound=Rej.Bound)
 
    #gene is significant if its q value less or equal than the fdr threshold; OR W>=W.threshold
    gene_sign=as.character(gene_id[which(qvalue<=fdr)])
 
-   return(list(W=W,W.threshold=W.threshold,Qvalue=pmin(qvalue, 1),gene_sign=gene_sign))
+   return(list(W=W,W.threshold=W.threshold,Qvalue=qvalue,gene_sign=gene_sign))
 }
 
 

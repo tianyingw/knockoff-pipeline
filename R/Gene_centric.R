@@ -344,8 +344,8 @@ extract_position_universal <- function(col_names) {
 }
 
 preprocess_for_GeneScan3DKnock <- function(p0, p_ko, M) {
-  p0   <- as.numeric(p0);  p0[is.na(p0)]     <- 0.5
-  p_ko <- as.matrix(p_ko); p_ko[is.na(p_ko)] <- 0.5
+  p0   <- as.numeric(p0)
+  p_ko <- as.matrix(p_ko)
   list(p0 = p0, p_ko = p_ko)
 }
 

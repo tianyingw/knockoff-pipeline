@@ -147,9 +147,9 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       p.common<-p.single[common.index,,drop=F]
       p.common_k<-p.single_k[common.index,,drop=F]
 
-      W<-(-log10(p.common)-apply(-log10(p.common_k),1,median))*(-log10(p.common)>=apply(-log10(p.common_k),1,max))
-      W[is.na(W)]<-0
       MK.stat<-MK.statistic(-log10(p.common),-log10(p.common_k),method='median')
+      W<-MK.stat[,'tau']*(MK.stat[,'kappa']==0)
+      W[!is.finite(W)]<-0
       temp.summary.single<-cbind(chr,pos[common.index],pos[common.index],
                                  pos[common.index],pos[common.index],
                                  (beta!=0)[common.index],
@@ -221,9 +221,9 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       #######
       p.A<-p.KS;p.A_k<-p.KS_k
       #Knockoff statistics
-      W<-(-log10(p.A)-apply(-log10(p.A_k),1,median))*(-log10(p.A)>=apply(-log10(p.A_k),1,max))
-      W[is.na(W)]<-0
       MK.stat<-MK.statistic(-log10(p.A),-log10(p.A_k),method='median')
+      W<-MK.stat[,'tau']*(MK.stat[,'kappa']==0)
+      W[!is.finite(W)]<-0
 
       temp.summary.window<-cbind(chr,window.summary,
                                  c(t(beta.rare!=0)%*%window.matrix0!=0),
@@ -427,12 +427,12 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
 
 KS_summary<-function(result.window,result.single,M,fdr=0.1){
 
-  temp<-result.single[,match(colnames(result.window),colnames(result.single))]
+  temp<-result.single[,match(colnames(result.window),colnames(result.single)),drop=FALSE]
   colnames(temp)<-colnames(result.window)
 
   result<-rbind(result.window,temp)
-  result<-result[order(result[,2]),]
-  result<-result[order(result[,1]),]
+  result<-result[order(result[,2]),,drop=FALSE]
+  result<-result[order(result[,1]),,drop=FALSE]
 
   q<-MK.q.byStat(result[,'kappa'],result[,'tau'],M=M)
   threshold<-MK.threshold.byStat(result[,'kappa'],result[,'tau'],M=M,fdr=fdr,Rej.Bound=10000)
@@ -647,9 +647,19 @@ Get.Z<-function(X,result.prelim){
 }
 
 MK.statistic<-function (T_0,T_k,method='median'){
+  if (length(method) != 1L || is.na(method) ||
+      !method %in% c("median", "max"))
+    stop("method must be 'median' or 'max'.", call. = FALSE)
   T_0<-as.matrix(T_0);T_k<-as.matrix(T_k)
   T.temp<-cbind(T_0,T_k)
-  T.temp[is.na(T.temp)]<-0
+  invalid <- apply(is.na(T.temp) | is.nan(T.temp) |
+                     (is.infinite(T.temp) & T.temp < 0), 1, any)
+  # Association-test p-values can underflow to zero.  Retain their ordering
+  # without allowing an infinite W to collide with Inf's use as the
+  # no-rejection threshold sentinel.
+  T.temp[is.infinite(T.temp) & T.temp > 0] <-
+    -log10(.Machine$double.xmin)
+  if (any(invalid)) T.temp[invalid, ] <- 0
 
   which.max.alt<-function(x){
     temp.index<-which(x==max(x))
@@ -662,26 +672,70 @@ MK.statistic<-function (T_0,T_k,method='median'){
     Get.OtherMedian<-function(x){median(x[-which.max(x)])}
     tau<-apply(T.temp,1,max)-apply(T.temp,1,Get.OtherMedian)
   }
+  kappa[invalid] <- NA_integer_
+  tau[invalid] <- 0
   return(cbind(kappa,tau))
 }
 
-MK.threshold.byStat<-function (kappa,tau,M,fdr = 0.1,Rej.Bound=10000){
-  b<-order(tau, kappa, decreasing=c(TRUE, FALSE))  # tie for tau: kappa=0 before kappa=1
-  c_0<-kappa[b]==0
-  ratio<-c();temp_0<-0
-  for(i in 1:length(b)){
-    #if(i==1){temp_0=c_0[i]}
-    temp_0<-temp_0+c_0[i]
-    temp_1<-i-temp_0
-    temp_ratio<-(1/M+1/M*temp_1)/max(1,temp_0)
-    ratio<-c(ratio,temp_ratio)
-    if(i>Rej.Bound){break}
+.MK.fdp.path <- function(kappa, tau, M, Rej.Bound = 10000) {
+  if (length(kappa) != length(tau))
+    stop("kappa and tau must have the same length.", call. = FALSE)
+  if (length(M) != 1L || is.na(M) || !is.finite(M) ||
+      M < 1 || M > .Machine$integer.max || M != floor(M))
+    stop("M must be a positive integer.", call. = FALSE)
+  if (length(Rej.Bound) != 1L || is.na(Rej.Bound) || Rej.Bound <= 0 ||
+      (is.finite(Rej.Bound) &&
+       (Rej.Bound > .Machine$integer.max || Rej.Bound != floor(Rej.Bound))))
+    stop("Rej.Bound must be a positive integer or Inf.", call. = FALSE)
+  M <- as.integer(M)
+  observed_kappa <- kappa[!is.na(kappa)]
+  if (any(!is.finite(observed_kappa)) ||
+      any(observed_kappa < 0 | observed_kappa > M |
+          observed_kappa != floor(observed_kappa)))
+    stop("Non-missing kappa values must be integers between 0 and M.",
+         call. = FALSE)
+  if (any(is.infinite(tau) & tau < 0, na.rm = TRUE))
+    stop("Non-missing tau values cannot be negative infinity.",
+         call. = FALSE)
+  # Positive infinity can occur in older intermediate files when a p-value
+  # underflowed to zero.  Use the same finite cap as MK.statistic so that Inf
+  # remains reserved for the no-rejection threshold sentinel.
+  tau[is.infinite(tau) & tau > 0] <- -log10(.Machine$double.xmin)
+  eligible <- which(!is.na(kappa) & !is.na(tau) & tau > 0)
+  if (length(eligible) == 0L)
+    return(list(index = integer(), group = integer(), threshold = numeric(),
+                fdp = numeric()))
+
+  b <- eligible[order(tau[eligible], decreasing = TRUE)]
+  if (is.finite(Rej.Bound) && length(b) > Rej.Bound) {
+    boundary <- max(1L, as.integer(Rej.Bound))
+    boundary_tau <- tau[b[boundary]]
+    boundary <- max(which(tau[b] == boundary_tau))
+    b <- b[seq_len(boundary)]
   }
-  ok<-which(ratio<=fdr)
-  if(length(ok)>0){
-    #ok<-ok[which(ok-ok[1]:(ok[1]+length(ok)-1)<=0)]
-    return(tau[b][ok[length(ok)]])
-  }else{return(Inf)}
+
+  original <- kappa[b] == 0
+  n_original <- cumsum(original)
+  n_knockoff <- seq_along(b) - n_original
+  group_end <- which(!duplicated(tau[b], fromLast = TRUE))
+  fdp <- (1 / M + n_knockoff[group_end] / M) /
+    pmax(1, n_original[group_end])
+  list(
+    index = b,
+    group = match(tau[b], tau[b][group_end]),
+    threshold = tau[b][group_end],
+    fdp = fdp
+  )
+}
+
+
+MK.threshold.byStat<-function (kappa,tau,M,fdr = 0.1,Rej.Bound=10000){
+  if (length(fdr) != 1L || is.na(fdr) || !is.finite(fdr) ||
+      fdr < 0 || fdr > 1)
+    stop("fdr must be a finite number between 0 and 1.", call. = FALSE)
+  path <- .MK.fdp.path(kappa, tau, M, Rej.Bound)
+  ok <- which(path$fdp <= fdr)
+  if (length(ok) > 0L) path$threshold[ok[length(ok)]] else Inf
 }
 
 MK.threshold<-function (T_0,T_k, fdr = 0.1,method='median',Rej.Bound=10000){
@@ -693,27 +747,16 @@ MK.threshold<-function (T_0,T_k, fdr = 0.1,method='median',Rej.Bound=10000){
 
 
 MK.q.byStat<-function (kappa,tau,M,Rej.Bound=10000){
-  b<-order(tau, kappa, decreasing=c(TRUE, FALSE))  # tie: kappa=0 before kappa=1
-  c_0<-kappa[b]==0
-  #calculate ratios for top Rej.Bound tau values
-  ratio<-c();temp_0<-0
-  for(i in 1:length(b)){
-    #if(i==1){temp_0=c_0[i]}
-    temp_0<-temp_0+c_0[i]
-    temp_1<-i-temp_0
-    temp_ratio<-(1/M+1/M*temp_1)/max(1,temp_0)
-    ratio<-c(ratio,temp_ratio)
-    if(i>Rej.Bound){break}
-  }
-  #calculate q values for top Rej.Bound values
-  q<-rep(1,length(tau));index_bound<-max(which(tau[b]>0))
-  for(i in 1:length(b)){
-    temp.index<-i:min(length(b),Rej.Bound,index_bound)
-    if(length(temp.index)==0){next}
-    q[b[i]]<-min(ratio[temp.index])*c_0[i]+1-c_0[i]
-    if(i>Rej.Bound){break}
-  }
-  return(pmin(q, 1))
+  path <- .MK.fdp.path(kappa, tau, M, Rej.Bound)
+  q <- rep(1, length(tau))
+  if (length(path$index) == 0L) return(q)
+
+  group_q <- rev(cummin(rev(path$fdp)))
+  original <- kappa[path$index] == 0
+  q[path$index[original]] <- pmin(
+    1, group_q[path$group[original]]
+  )
+  q
 }
 
 

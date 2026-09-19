@@ -195,6 +195,25 @@ test_that("BIGKnock preserves two target columns when LD reduction would leave o
 })
 
 
+test_that("BIGKnock enhancer permits one target with a testable surround", {
+  toy <- make_bigknock_alignment_toy()
+  selected <- KnockoffPipeline:::.bigknock_prepare_region(
+    toy$x, toy$positions, region_start = 170, region_end = 190,
+    LD_filter = 0.75, label = "enhancer", min_target_variants = 1L
+  )
+
+  expect_equal(selected$target_positions, 180)
+  set.seed(19)
+  generated <- KnockoffPipeline:::Knockoffgeneration.enhancer(
+    toy$x, positions = toy$positions,
+    enhancer_start = 170, enhancer_end = 190,
+    M = 2L, LD.filter = 0.75, return_details = TRUE
+  )
+  expect_equal(generated$positions, 180)
+  expect_identical(dim(generated$knockoff), c(2L, nrow(toy$x), 1L))
+})
+
+
 test_that("BIGKnock validates and persists selected gene-buffer identity", {
   toy <- make_bigknock_alignment_toy()
   set.seed(23)

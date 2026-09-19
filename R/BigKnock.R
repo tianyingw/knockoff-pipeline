@@ -54,7 +54,7 @@ utils::globalVariables(c('G_gene_buffer_surround','LD.filter',
 
 .bigknock_prepare_region <- function(
   X, positions, region_start, region_end, LD_filter = 0.75,
-  min_mac = 25, label = "region"
+  min_mac = 25, label = "region", min_target_variants = 2L
 ) {
   # Keep the full surround sparse; converting n-by-p biobank matrices to base
   # matrices before MAC filtering can require many unnecessary gigabytes.
@@ -105,9 +105,10 @@ utils::globalVariables(c('G_gene_buffer_surround','LD.filter',
   if (any(flip)) X[, flip] <- 2 - X[, flip, drop = FALSE]
 
   initial_target <- positions >= region_start & positions <= region_end
-  if (sum(initial_target) <= 1L) {
+  if (sum(initial_target) < min_target_variants) {
     stop("BIGKnock ", label,
-         " has <=1 target variant after MAC and variance filtering.",
+         " has fewer than ", min_target_variants,
+         " target variant(s) after MAC and variance filtering.",
          call. = FALSE)
   }
 
@@ -461,6 +462,7 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   MAF       <- .kp_col_means(G_gene_buffer_surround) / 2
   variance  <- .kp_col_means(G_gene_buffer_surround^2) -
     .kp_col_means(G_gene_buffer_surround)^2
+  minor_mac <- 2 * nrow(G_gene_buffer_surround) * MAF
   SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
   if (length(SNP.index) <= 1) {
     warning("Number of variants passing QC in gene buffer surround is <=1", call. = FALSE)
@@ -490,6 +492,14 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
   ]
   if (length(positions_gene_buffer) == 0) return(NULL)
+  in_gene_buffer <- variants_gene_buffer_surround_filter <= gene_buffer.pos[2] &
+    variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
+  target_mac <- minor_mac[SNP.index][in_gene_buffer]
+  if (sum(is.finite(target_mac) & target_mac >= 25) <= 1L) {
+    warning("Gene buffer has <=1 target variant after BIGKnock MAC and variance filtering; skipping gene.",
+            call. = FALSE)
+    return(NULL)
+  }
   persistent_knockoff <- isTRUE(save_knockoff) || isTRUE(load_knockoff)
   current_context <- if (persistent_knockoff) {
     .make_knockoff_context(
@@ -590,6 +600,7 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
       MAF       <- .kp_col_means(G_Enh_surround) / 2
       variance  <- .kp_col_means(G_Enh_surround^2) -
         .kp_col_means(G_Enh_surround)^2
+      minor_mac <- 2 * nrow(G_Enh_surround) * MAF
       SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
       if (length(SNP.index) <= 1) {
         warning(sprintf("Enhancer %d: variants passing QC <=1; skipping.", r), call. = FALSE)
@@ -598,6 +609,16 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
       G_Enh_surround   <- Matrix::Matrix(G_Enh_surround[, SNP.index])
       pos_Enh_filter   <- pos_Enh_surround[SNP.index]
       colnames(G_Enh_surround) <- extract_position_universal(colnames(G_Enh_surround))
+      in_enhancer <- pos_Enh_filter >= as.numeric(Enhancer.pos[r, 1]) &
+        pos_Enh_filter <= as.numeric(Enhancer.pos[r, 2])
+      mac_pass <- is.finite(minor_mac[SNP.index]) & minor_mac[SNP.index] >= 25
+      if (sum(mac_pass) <= 1L || sum(mac_pass & in_enhancer) == 0L) {
+        warning(sprintf(
+          "Enhancer %d: no testable target or <=1 total variant after BIGKnock MAC and variance filtering; skipping.",
+          r
+        ), call. = FALSE)
+        next
+      }
 
       # Generate enhancer knockoff fresh (NOT saved)
       # BUG FIX: was M=5 (hardcoded)
@@ -756,7 +777,7 @@ Knockoffgeneration.enhancer <- function(
   prepared <- .bigknock_prepare_region(
     G_enhancer_surround, positions,
     enhancer_start, enhancer_end, LD.filter,
-    min_mac = 25, label = "enhancer"
+    min_mac = 25, label = "enhancer", min_target_variants = 1L
   )
   n <- nrow(prepared$surround_matrix)
   knockoff <- create.MK.AL_enhancer(
