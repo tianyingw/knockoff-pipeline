@@ -16,6 +16,96 @@ utils::globalVariables(c(
   ids
 }
 
+
+# Read the phenotype and PLINK sample tables, apply the analysis complete-case
+# rule, and return both tables in the same .fam-defined IID order.  Every
+# pipeline stage uses this helper so stage-1 knockoffs are generated for the
+# exact sample set used by full and stage-2 analyses.
+.prepare_analysis_samples <- function(
+  pheno_file, phenotype, pheno_id, covar_cols, cat_covar_cols, plink_fam
+) {
+  message("Reading phenotype file: ", pheno_file)
+  pheno <- data.table::fread(pheno_file, keepLeadingZeros = TRUE)
+
+  missing_pheno <- setdiff(phenotype, colnames(pheno))
+  if (length(missing_pheno) > 0L)
+    stop("Phenotype column(s) not found: ",
+         paste(missing_pheno, collapse = ", "))
+
+  all_covar_cols <- c(covar_cols, cat_covar_cols)
+  missing_covar <- setdiff(all_covar_cols, colnames(pheno))
+  if (length(missing_covar) > 0L)
+    stop("Covariate column(s) not found: ",
+         paste(missing_covar, collapse = ", "))
+  if (!is.null(pheno_id) && !pheno_id %in% colnames(pheno))
+    stop("Sample ID column \"", pheno_id,
+         "\" not found in phenotype file.")
+
+  check_cols <- unique(c(phenotype, all_covar_cols))
+  complete_mask <- stats::complete.cases(pheno[, check_cols, with = FALSE])
+  n_incomplete <- sum(!complete_mask)
+  if (n_incomplete > 0L) {
+    message(sprintf(
+      "%d sample(s) removed: missing in at least one of [%s].",
+      n_incomplete, paste(check_cols, collapse = ", ")
+    ))
+    pheno <- pheno[complete_mask]
+  }
+  message(nrow(pheno), " sample(s) retained after missing-value filtering.")
+
+  fam <- data.table::fread(
+    plink_fam, header = FALSE, keepLeadingZeros = TRUE,
+    col.names = c("FID", "IID", "PAT", "MAT", "SEX", "PHENO")
+  )
+  fam[, IID := .as_sample_id(IID, "PLINK .fam IIDs")]
+
+  if (!is.null(pheno_id)) {
+    pheno_iid <- .as_sample_id(
+      pheno[[pheno_id]], paste0("phenotype column '", pheno_id, "'")
+    )
+    fam_iid <- fam$IID
+    shared_iid <- intersect(fam_iid, pheno_iid)
+
+    if (length(shared_iid) == 0L)
+      stop("No samples matched between phenotype (column \"", pheno_id,
+           "\") and PLINK .fam.\n",
+           "  Example pheno IID : ",
+           paste(utils::head(pheno_iid, 3L), collapse = ", "), "\n",
+           "  Example .fam  IID : ",
+           paste(utils::head(fam_iid, 3L), collapse = ", "))
+
+    n_pheno_only <- length(setdiff(pheno_iid, fam_iid))
+    n_fam_only <- length(setdiff(fam_iid, pheno_iid))
+    if (n_pheno_only > 0L)
+      message("  ", n_pheno_only,
+              " sample(s) in phenotype not in .fam -- excluded.")
+    if (n_fam_only > 0L)
+      message("  ", n_fam_only,
+              " sample(s) in .fam not in phenotype -- excluded.")
+    message("  ", length(shared_iid), " sample(s) matched.")
+
+    plink_keep_fam <- fam[match(shared_iid, fam_iid), .(FID, IID)]
+    pheno <- pheno[match(shared_iid, pheno_iid)]
+    sample_ids <- shared_iid
+  } else {
+    if (nrow(pheno) != nrow(fam))
+      stop("pheno_id is NULL but phenotype has ", nrow(pheno),
+           " rows while .fam has ", nrow(fam), " rows.")
+    plink_keep_fam <- fam[, .(FID, IID)]
+    # Retain the .fam IIDs so PLINK exports and downstream rows can be checked
+    # and aligned even when the phenotype file has no explicit ID column.
+    sample_ids <- fam$IID
+  }
+
+  list(
+    pheno = pheno,
+    sample_ids = sample_ids,
+    plink_keep_fam = plink_keep_fam,
+    all_covar_cols = all_covar_cols,
+    all_fam_samples_retained = nrow(plink_keep_fam) == nrow(fam)
+  )
+}
+
 .plink_additive_export_switch <- function(plink_prefix, version_text = NULL) {
   if (is.null(version_text)) {
     version_text <- tryCatch(
@@ -32,14 +122,31 @@ utils::globalVariables(c(
 }
 
 .run_plink_additive_export <- function(
-  plink_prefix, geno_file, chr, start, stop, keep_arg, out_prefix
+  plink_prefix, geno_file, chr, start, stop, keep_arg, out_prefix,
+  export_switch = NULL, plink_threads = NULL
 ) {
-  export_switch <- .plink_additive_export_switch(plink_prefix)
+  if (is.null(export_switch))
+    export_switch <- .plink_additive_export_switch(plink_prefix)
+  if (!is.character(export_switch) || length(export_switch) != 1L ||
+      is.na(export_switch) ||
+      !export_switch %in% c("--recode A", "--export A"))
+    stop("'export_switch' must be one of '--recode A' or '--export A'.")
+
+  threads_arg <- ""
+  if (!is.null(plink_threads)) {
+    if (!is.numeric(plink_threads) || length(plink_threads) != 1L ||
+        is.na(plink_threads) || !is.finite(plink_threads) ||
+        plink_threads < 1 || plink_threads > .Machine$integer.max ||
+        plink_threads != floor(plink_threads))
+      stop("'plink_threads' must be NULL or one positive integer.")
+    threads_arg <- paste("--threads", as.integer(plink_threads))
+  }
+
   cmd <- sprintf(
-    "%s --bfile %s --chr %s --from-bp %d --to-bp %d %s %s --out %s --silent",
+    "%s --bfile %s --chr %s --from-bp %d --to-bp %d %s %s %s --out %s --silent",
     shQuote(plink_prefix), shQuote(geno_file), as.integer(chr),
     as.integer(start), as.integer(stop), keep_arg, export_switch,
-    shQuote(out_prefix)
+    threads_arg, shQuote(out_prefix)
   )
   system(cmd, ignore.stdout = TRUE, ignore.stderr = TRUE)
 }
@@ -155,8 +262,40 @@ utils::globalVariables(c(
 
   genotype_names <- names(raw)[-(1:6)]
   variant_metadata <- .match_raw_variants(genotype_names, bim_metadata)
-  geno <- as.matrix(raw[row_index, -(1:6), drop = FALSE])
-  storage.mode(geno) <- "numeric"
+  genotype_columns <- raw[, -(1:6), drop = FALSE]
+
+  # PLINK already writes rows in --keep/.fam order in the common case.  Avoid
+  # duplicating every genotype column solely to apply an identity permutation.
+  identity_order <- length(row_index) == nrow(raw) &&
+    identical(row_index, seq_len(nrow(raw)))
+  if (!identity_order)
+    genotype_columns <- genotype_columns[row_index, , drop = FALSE]
+
+  numeric_columns <- vapply(genotype_columns, is.numeric, logical(1))
+  nonnumeric_index <- which(!numeric_columns)
+  all_missing <- rep(FALSE, length(numeric_columns))
+  all_missing[nonnumeric_index] <- vapply(
+    genotype_columns[nonnumeric_index],
+    function(values) is.atomic(values) && all(is.na(values)), logical(1)
+  )
+  missing_only_nonnumeric <- !numeric_columns & all_missing
+  if (any(missing_only_nonnumeric)) {
+    genotype_columns[missing_only_nonnumeric] <- lapply(
+      genotype_columns[missing_only_nonnumeric],
+      function(values) rep.int(NA_integer_, length(values))
+    )
+    numeric_columns[missing_only_nonnumeric] <- TRUE
+  }
+  if (any(!numeric_columns)) {
+    stop(
+      "PLINK .raw contains non-numeric genotype column(s): ",
+      paste(utils::head(genotype_names[!numeric_columns], 5L), collapse = ", ")
+    )
+  }
+
+  # as.matrix() preserves an all-integer export; mixed integer/double input is
+  # promoted only when required by R's matrix representation.
+  geno <- as.matrix(genotype_columns)
   rownames(geno) <- target_ids
   colnames(geno) <- genotype_names
 

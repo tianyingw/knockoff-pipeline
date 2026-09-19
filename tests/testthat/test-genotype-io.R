@@ -38,6 +38,126 @@ test_that("PLINK rows are aligned by character IID without losing leading zeros"
 })
 
 
+test_that("identity-ordered integer genotypes stay integer", {
+  raw <- data.frame(
+    FID = c("f1", "f2", "f3"), IID = c("001", "002", "003"),
+    PAT = "0", MAT = "0", SEX = 1L, PHENOTYPE = -9L,
+    "rs1_A" = c(0L, 1L, 2L), "rs2_C" = c(2L, 1L, 0L),
+    "rs3_G" = c(NA, NA, NA),
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  bim <- data.frame(
+    chr = rep("1", 3L), variant_id = c("rs1", "rs2", "rs3"),
+    pos = c(101, 202, 303), a1 = c("A", "C", "G"),
+    a2 = c("G", "T", "A"),
+    stringsAsFactors = FALSE
+  )
+
+  prepared <- KnockoffPipeline:::.prepare_raw_genotypes(
+    raw, target_ids = raw$IID, bim_metadata = bim
+  )
+
+  expect_type(prepared$geno, "integer")
+  expect_identical(
+    unname(prepared$geno),
+    matrix(c(0L, 1L, 2L, 2L, 1L, 0L, rep(NA_integer_, 3L)),
+           nrow = 3L)
+  )
+})
+
+
+test_that("reordered genotype rows equal an explicit identity-result subset", {
+  raw <- data.frame(
+    FID = c("f1", "f2", "f3"), IID = c("s1", "s2", "s3"),
+    PAT = "0", MAT = "0", SEX = 1L, PHENOTYPE = -9L,
+    "rs1_A" = c(0L, 1L, 2L), "rs2_C" = c(2L, 0L, 1L),
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  bim <- data.frame(
+    chr = c("1", "1"), variant_id = c("rs1", "rs2"),
+    pos = c(101, 202), a1 = c("A", "C"), a2 = c("G", "T"),
+    stringsAsFactors = FALSE
+  )
+  identity <- KnockoffPipeline:::.prepare_raw_genotypes(
+    raw, target_ids = raw$IID, bim_metadata = bim
+  )
+  target_ids <- c("s3", "s1", "s2")
+  reordered <- KnockoffPipeline:::.prepare_raw_genotypes(
+    raw, target_ids = target_ids, bim_metadata = bim
+  )
+
+  expected_index <- match(target_ids, identity$sample_ids)
+  expect_identical(
+    reordered$geno,
+    identity$geno[expected_index, , drop = FALSE]
+  )
+  expect_identical(reordered$variant_metadata, identity$variant_metadata)
+})
+
+
+test_that("non-numeric PLINK genotype columns fail explicitly", {
+  raw <- data.frame(
+    FID = c("f1", "f2"), IID = c("s1", "s2"),
+    PAT = "0", MAT = "0", SEX = 1L, PHENOTYPE = -9L,
+    "rs1_A" = c("0", "not-a-genotype"),
+    check.names = FALSE, stringsAsFactors = FALSE
+  )
+  bim <- data.frame(
+    chr = "1", variant_id = "rs1", pos = 101, a1 = "A", a2 = "G",
+    stringsAsFactors = FALSE
+  )
+
+  expect_error(
+    KnockoffPipeline:::.prepare_raw_genotypes(
+      raw, target_ids = raw$IID, bim_metadata = bim
+    ),
+    "non-numeric genotype column.*rs1_A"
+  )
+})
+
+
+test_that("all stages use phenotype and covariate complete cases in .fam order", {
+  input_dir <- tempfile("analysis-samples-")
+  dir.create(input_dir)
+  on.exit(unlink(input_dir, recursive = TRUE, force = TRUE), add = TRUE)
+
+  pheno_file <- file.path(input_dir, "phenotype.csv")
+  fam_file <- file.path(input_dir, "genotype.fam")
+  data.table::fwrite(
+    data.table::data.table(
+      IID = c("003", "001", "004", "002"),
+      Y = c(1, 2, NA, 4),
+      PC1 = c(0.3, NA, 0.4, 0.2),
+      Batch = c("A", "A", "B", "B")
+    ),
+    pheno_file
+  )
+  data.table::fwrite(
+    data.table::data.table(
+      FID = c("f1", "f2", "f3", "f4", "f5"),
+      IID = c("001", "002", "003", "004", "005"),
+      PAT = "0", MAT = "0", SEX = "0", PHENO = "-9"
+    ),
+    fam_file, sep = "\t", col.names = FALSE
+  )
+
+  prepared <- KnockoffPipeline:::.prepare_analysis_samples(
+    pheno_file = pheno_file,
+    phenotype = "Y",
+    pheno_id = "IID",
+    covar_cols = "PC1",
+    cat_covar_cols = "Batch",
+    plink_fam = fam_file
+  )
+
+  expect_identical(prepared$sample_ids, c("002", "003"))
+  expect_identical(as.character(prepared$pheno$IID), c("002", "003"))
+  expect_identical(as.character(prepared$plink_keep_fam$IID),
+                   c("002", "003"))
+  expect_identical(prepared$all_covar_cols, c("PC1", "Batch"))
+})
+
+
 test_that("additive genotype export selects the installed PLINK dialect", {
   expect_identical(
     KnockoffPipeline:::.plink_additive_export_switch(
@@ -50,6 +170,51 @@ test_that("additive genotype export selects the installed PLINK dialect", {
       "plink", version_text = "PLINK v2.00a6.5LM 64-bit"
     ),
     "--export A"
+  )
+})
+
+
+test_that("additive export accepts cached dialect and an explicit thread count", {
+  skip_on_os("windows")
+  tmpdir <- tempfile("fake-plink-")
+  dir.create(tmpdir)
+  on.exit(unlink(tmpdir, recursive = TRUE, force = TRUE), add = TRUE)
+  fake_plink <- file.path(tmpdir, "fake plink")
+  args_file <- file.path(tmpdir, "args.txt")
+  writeLines(
+    c("#!/bin/sh", sprintf("printf '%%s\\n' \"$@\" > %s", shQuote(args_file))),
+    fake_plink
+  )
+  Sys.chmod(fake_plink, mode = "0755")
+
+  status <- KnockoffPipeline:::.run_plink_additive_export(
+    plink_prefix = fake_plink,
+    geno_file = file.path(tmpdir, "input prefix"),
+    chr = 1L, start = 10L, stop = 20L, keep_arg = "",
+    out_prefix = file.path(tmpdir, "output prefix"),
+    export_switch = "--export A", plink_threads = 3L
+  )
+  args <- readLines(args_file)
+
+  expect_identical(status, 0L)
+  expect_false("--version" %in% args)
+  expect_identical(args[match("--export", args) + 1L], "A")
+  expect_identical(args[match("--threads", args) + 1L], "3")
+
+  default_status <- KnockoffPipeline:::.run_plink_additive_export(
+    fake_plink, "input", 1L, 10L, 20L, "", "output",
+    export_switch = "--recode A"
+  )
+  default_args <- readLines(args_file)
+  expect_identical(default_status, 0L)
+  expect_false("--threads" %in% default_args)
+
+  expect_error(
+    KnockoffPipeline:::.run_plink_additive_export(
+      fake_plink, "input", 1L, 10L, 20L, "", "output",
+      export_switch = "--export A", plink_threads = 0L
+    ),
+    "positive integer"
   )
 })
 
