@@ -1,3 +1,36 @@
+.get_p_in_chunks <- function(X, result.prelim, column_index = NULL,
+                             chunk_size = 1000L) {
+  if (is.null(column_index)) column_index <- seq_len(ncol(X))
+  column_index <- as.integer(column_index)
+  if (length(column_index) == 0L) return(matrix(numeric(0), ncol = 1L))
+  if (!is.numeric(chunk_size) || length(chunk_size) != 1L ||
+      is.na(chunk_size) || chunk_size < 1L)
+    stop("'chunk_size' must be one positive integer.")
+
+  groups <- split(
+    seq_along(column_index),
+    ceiling(seq_along(column_index) / as.integer(chunk_size))
+  )
+  answer <- NULL
+  for (target in groups) {
+    source <- column_index[target]
+    chunk <- as.matrix(Get.p(X[, source, drop = FALSE], result.prelim))
+    if (nrow(chunk) != length(target))
+      stop("Get.p returned an unexpected number of rows.")
+    if (is.null(answer)) {
+      answer <- matrix(
+        NA_real_, nrow = length(column_index), ncol = ncol(chunk)
+      )
+      if (!is.null(colnames(chunk))) colnames(answer) <- colnames(chunk)
+    } else if (ncol(chunk) != ncol(answer)) {
+      stop("Get.p returned an inconsistent number of columns across chunks.")
+    }
+    answer[target, ] <- chunk
+  }
+  answer
+}
+
+
 KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,region.pos=NULL,tested.pos=NULL,excluded.pos=NULL,M=5,thres.single=0.01,thres.ultrarare=25,thres.missing=0.10,midout.dir=NULL,temp.dir=NULL,jobtitle=NULL,Gsub.id=NULL,impute.method='fixed',bigmemory=T,leveraging=T,LD.filter=NULL){
   time.start<-proc.time()[3]
   #region.step=0.1*10^5
@@ -32,11 +65,11 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       match.index <- match.index[!is.na(match.index)]
     }
     G <- input.X[match.index,,drop=F]
-    colmeans <- apply(G,2,mean)
     #sparse matrix operation
     MAF<-colMeans(G)/2;MAC<-colSums(G)
-    MAF[MAF>0.5]<-1-MAF[MAF>0.5]
-    MAC[MAF>0.5]<-nrow(G)*2-MAC[MAF>0.5]
+    flip_to_minor <- MAF > 0.5 & !is.na(MAF)
+    MAC[flip_to_minor] <- nrow(G)*2-MAC[flip_to_minor]
+    MAF[flip_to_minor] <- 1-MAF[flip_to_minor]
     s<-colMeans(G^2)-colMeans(G)^2
     SNP.index<-which(MAF>0 & MAC>=thres.ultrarare & s!=0 & !is.na(MAF))# & MAC>10
 
@@ -52,7 +85,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
     if(length(beta)==0){beta<-rep(0,ncol(G))}
 
     ##single variant test for all variants
-    p.single<-as.matrix(Get.p(G,result.prelim))
+    p.single <- .get_p_in_chunks(G, result.prelim)
 
     #output info for tested variants
     temp.variant.info<-cbind(pos,p.single,MAF[SNP.index],MAC[SNP.index])
@@ -61,9 +94,10 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
     variant.info<-rbind(variant.info,temp.variant.info)
     
     MAF<-colMeans(G)/2;MAC<-colSums(G)
-    MAF[MAF>0.5]<-1-MAF[MAF>0.5]
+    flip_to_minor <- MAF > 0.5 & !is.na(MAF)
+    MAC[flip_to_minor] <- nrow(G)*2-MAC[flip_to_minor]
+    MAF[flip_to_minor] <- 1-MAF[flip_to_minor]
     # print(sum(MAF>0.01))
-    MAC[MAF>0.5]<-nrow(G)*2-MAC[MAF>0.5]
     G<-Matrix(G,sparse=T)
 
     #get positions
@@ -79,22 +113,29 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       }else{
         G_k<-create.MK(G,pos,M=M,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=0.1*10^6,thres.ultrarare=thres.ultrarare,bigmemory=bigmemory,n.AL=nrow(G),R2.thres=0.75)
       }
+      G_k_column_index <- seq_len(ncol(G))
     }else{
       G_k <- input.G_k
+      if (length(G_k) != M)
+        stop("The number of supplied knockoff matrices does not match M.")
+      if (any(vapply(G_k, nrow, numeric(1)) != nrow(input.X)))
+        stop("A supplied knockoff matrix has the wrong number of rows.")
+      if (any(vapply(G_k, ncol, numeric(1)) < max(SNP.index)))
+        stop("A supplied knockoff matrix has too few columns for the QC index.")
+      G_k_column_index <- SNP.index
     }
     # toc()
     
     # tic('knockoff analysis')
     ##single variant test for all variants
-    p.single_k<-c()
+    p.single_k <- matrix(NA_real_, nrow = ncol(G), ncol = M)
     for(k in 1:M){
-      temp.p<-c()
-      for(i in 1:ceiling(ncol(G)/1000)){
-        temp.X<-G_k[[k]][,(1+(i-1)*1000):min(ncol(G),i*1000),drop=F]
-        temp.p<-rbind(temp.p,Get.p(temp.X,result.prelim))
-      }
-      p.single_k<-cbind(p.single_k,temp.p)
-      gc()
+      temp.p <- .get_p_in_chunks(
+        G_k[[k]], result.prelim, column_index = G_k_column_index
+      )
+      if (ncol(temp.p) != 1L)
+        stop("Single-variant Get.p must return one p-value column.")
+      p.single_k[, k] <- temp.p[, 1L]
     }
     # toc()
 
@@ -175,7 +216,10 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
         temp.G<-G[,rare.index[temp.index],drop=F]
         temp.G_k<-list()
         for(k in 1:M){
-          temp.G_k[[k]]<-Matrix(G_k[[k]][,rare.index[temp.index],drop=F],sparse=T)
+          temp.G_k[[k]]<-Matrix(
+            G_k[[k]][,G_k_column_index[rare.index[temp.index]],drop=F],
+            sparse=T
+          )
         }
         KS.fit<-KS.test(temp.G,temp.G_k,p.rare[temp.index],p.rare_k[temp.index,,drop=F],result.prelim,window.matrix=temp.window.matrix,weight.matrix=temp.weight.matrix)
         p.KS<-rbind(p.KS,KS.fit$p.KS)
@@ -223,8 +267,9 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
 
   if(class(X)[1]!='dgCMatrix'){X<-Matrix(X,sparse=T)} #convert it to sparse matrix format
 
-  sparse.fit<-sparse.cor(X)
-  cor.X<-sparse.fit$cor;cov.X<-sparse.fit$cov
+  cor.X <- .kp_sparse_cov_cor(
+    X, need_cov = FALSE, need_cor = TRUE
+  )$cor
 
   #svd to get leverage score, can be optimized;update: tried fast leveraging, but the R matrix is singular possibly because X is sparse.
   if(method=='svd.irlba'){
@@ -255,9 +300,10 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
   rm(svd.X.u) #remove temp file
 
   X.AL<-w*X[index.AL,]
-  sparse.fit<-sparse.cor(X.AL)
-  cor.X.AL<-sparse.fit$cor;cov.X.AL<-sparse.fit$cov
-  skip.index<-colSums(X.AL!=0)<=thres.ultrarare #skip features that are ultra sparse, permutation will be directly applied to generate knockoffs
+  cov.X.AL <- .kp_sparse_cov_cor(
+    X.AL, need_cov = TRUE, need_cor = FALSE
+  )$cov
+  skip.index <- which(colSums(X.AL != 0) <= thres.ultrarare)
 
   Sigma.distance = as.dist(1 - abs(cor.X))
   if(ncol(X)>1){
@@ -334,8 +380,10 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
           temp.xy<-rbind(mean(y.AL),crossprod(x.AL,y.AL)/length(y.AL)-colMeans(x.AL)*mean(y.AL))
           temp.xy<-rbind(temp.xy,crossprod(x.exist.AL,y.AL)/length(y.AL)-colMeans(x.exist.AL)*mean(y.AL))
 
-          temp.cov.cross<-sparse.cov.cross(x.AL,x.exist.AL)$cov
-          temp.cov<-sparse.cor(x.exist.AL)$cov
+          temp.cov.cross <- .kp_sparse_cross_cov(x.AL, x.exist.AL)
+          temp.cov <- .kp_sparse_cov_cor(
+            x.exist.AL, need_cov = TRUE, need_cor = FALSE
+          )$cov
           temp.xx<-cov.X.AL[index,index]
           temp.xx<-rbind(cbind(temp.xx,temp.cov.cross),cbind(t(temp.cov.cross),temp.cov))
 
@@ -440,10 +488,11 @@ KS.test<-function(temp.G,temp.G_k,p.rare,p.rare_k,result.prelim,window.matrix,we
   for (k in 1:ncol(weight.matrix)){
     temp.window.matrix<-weight.matrix[,k]*window.matrix
     p.burden[,k]<-Get.p(temp.G%*%temp.window.matrix,result.prelim)
-    temp<-c()
+    temp <- matrix(NA_real_, nrow = ncol(window.matrix), ncol = M)
     for(i in 1:M){
-      temp<-cbind(temp,Get.p(temp.G_k[[i]][]%*%temp.window.matrix,result.prelim))
-      gc()
+      temp[, i] <- as.numeric(
+        Get.p(temp.G_k[[i]][]%*%temp.window.matrix,result.prelim)
+      )
     }
     p.burden_k[,,k]<-t(temp)
   }
@@ -460,15 +509,25 @@ KS.test<-function(temp.G,temp.G_k,p.rare,p.rare_k,result.prelim,window.matrix,we
   K<-A-B%*%C%*%t(B) #here we use the same K for original and knockoffs, due to the exchangeability
 
   score<-t(temp.G)%*%Y.res#;re.score<-t(t(temp.G)%*%re.Y.res)
-  score_k<-c()
+  score_k <- matrix(NA_real_, nrow = ncol(temp.G), ncol = M)
   for(i in 1:M){
-    score_k<-cbind(score_k,crossprod(temp.G_k[[i]][,],Y.res))
-    gc()
+    score_k[, i] <- as.numeric(crossprod(temp.G_k[[i]][,],Y.res))
   }
   for (k in 1:ncol(weight.matrix)){
     # print(k)
-    p.dispersion[,k]<-Get.p.SKAT.KS(score,K,window.matrix,weight=weight.matrix[,k],result.prelim)
-    p.dispersion_k[,,k]<-t(sapply(1:length(temp.G_k),function(s){Get.p.SKAT.KS(score_k[,s],K,window.matrix,weight=weight.matrix[,k],result.prelim)}))
+    skat_prepared <- .prepare_skat_ks(
+      K, window.matrix, weight = weight.matrix[, k]
+    )
+    p.dispersion[,k] <- .get_p_skat_ks_prepared(
+      score, window.matrix, weight.matrix[, k], skat_prepared
+    )
+    p.dispersion_k[,,k] <- t(vapply(
+      seq_len(M),
+      function(s) as.numeric(.get_p_skat_ks_prepared(
+        score_k[, s], window.matrix, weight.matrix[, k], skat_prepared
+      )),
+      numeric(ncol(window.matrix))
+    ))
   }
   #proc.time()
 
@@ -532,19 +591,25 @@ Get_Liu_Params_Mod_Lambda<-function(lambda){
   return(re)
 }
 
-Get.p.SKAT.KS<-function(score,K,window.matrix,weight,result.prelim){
-  mu<-result.prelim$nullglm$fitted.values;Y.res<-result.prelim$Y-mu
-  X0<-result.prelim$X0;outcome<-result.prelim$out_type
+.prepare_skat_ks <- function(K, window.matrix, weight) {
+  K.temp <- weight * t(weight * K)
+  lapply(seq_len(ncol(window.matrix)), function(i) {
+    member <- window.matrix[, i] != 0
+    temp <- K.temp[member, member, drop = FALSE]
+    if (sum(temp^2) == 0) return(NULL)
+    lambda <- eigen(temp, symmetric = TRUE, only.values = TRUE)$values
+    if (anyNA(lambda)) return(NULL)
+    lambda
+  })
+}
+
+.get_p_skat_ks_prepared <- function(score, window.matrix, weight,
+                                    prepared) {
   Q<-as.vector(t(score^2)%*%(weight*window.matrix)^2)
-  K.temp<-weight*t(weight*K)
   p<-rep(NA,length(Q))
   for(i in 1:length(Q)){
-    #print(i)
-    temp<-K.temp[window.matrix[,i]!=0,window.matrix[,i]!=0]
-    if(sum(temp^2)==0){p[i]<-NA;next}
-
-    lambda=eigen(temp,symmetric=T,only.values=T)$values
-    if(sum(is.na(lambda))!=0){p[i]<-NA;next}
+    lambda <- prepared[[i]]
+    if (is.null(lambda)) {p[i] <- NA; next}
 
     #temp.p<-SKAT_davies(Q[i],lambda,acc=10^(-6))$Qq
     temp.p<-davies(Q[i],lambda,acc=10^(-6))$Qq
@@ -558,6 +623,11 @@ Get.p.SKAT.KS<-function(score,K,window.matrix,weight,result.prelim){
   return(as.matrix(p))
 }
 
+Get.p.SKAT.KS<-function(score,K,window.matrix,weight,result.prelim){
+  prepared <- .prepare_skat_ks(K, window.matrix, weight)
+  .get_p_skat_ks_prepared(score, window.matrix, weight, prepared)
+}
+
 
 
 #percentage notation
@@ -566,13 +636,7 @@ percent <- function(x, digits = 3, format = "f", ...) {
 }
 
 sparse.cor <- function(x){
-  x <- as.matrix(x) ##
-  n <- nrow(x)
-  cMeans <- colMeans(x)
-  covmat <- (as.matrix(crossprod(x)) - n*tcrossprod(cMeans))/(n-1)
-  sdvec <- sqrt(diag(covmat))
-  cormat <- covmat/tcrossprod(sdvec)
-  list(cov=covmat,cor=cormat)
+  .kp_sparse_cov_cor(x, need_cov = TRUE, need_cor = TRUE)
 }
 
 # sparse.cor <- function(x){
@@ -593,12 +657,7 @@ sparse.cor <- function(x){
 # }
 
 sparse.cov.cross <- function(x,y){
-  x<-as.matrix(x)
-  y<-as.matrix(y)
-  n <- nrow(x)
-  cMeans.x <- colMeans(x);cMeans.y <- colMeans(y)
-  covmat <- (as.matrix(crossprod(x,y)) - n*tcrossprod(cMeans.x,cMeans.y))/(n-1)
-  list(cov=covmat)
+  list(cov = .kp_sparse_cross_cov(x, y))
 }
 
 
@@ -608,12 +667,16 @@ Get.p.base<-function(X,result.prelim){
   #X<-Matrix(X)
   mu<-result.prelim$nullglm$fitted.values;Y.res<-result.prelim$Y-mu
   outcome<-result.prelim$out_type
-  if(outcome=='D'){v<-mu*(1-mu)}else{v<-rep(as.numeric(var(Y.res)),nrow(X))}
-  A<-(t(X)%*%Y.res)^2
-  B<-colSums(v*X^2)
-  C<-t(X)%*%(v*result.prelim$X0)%*%result.prelim$inv.X0
-  D<-t(t(result.prelim$X0)%*%as.matrix(v*X))
-  p<-pchisq(as.numeric(A/(B-rowSums(C*D))),df=1,lower.tail=F)
+  if(outcome=='D'){
+    v<-mu*(1-mu)
+    A<-(t(X)%*%Y.res)^2
+    B<-colSums(v*X^2)
+    C<-t(X)%*%(v*result.prelim$X0)%*%result.prelim$inv.X0
+    D<-t(t(result.prelim$X0)%*%as.matrix(v*X))
+    p<-pchisq(as.numeric(A/(B-rowSums(C*D))),df=1,lower.tail=F)
+  }else{
+    p <- .kp_continuous_score_p(X, result.prelim)
+  }
   #p<-pchisq(as.numeric((t(X)%*%Y.res)^2/(apply(X*(v*X),2,sum)-apply(t(X)%*%(v*result.prelim$X0)%*%result.prelim$inv.X0*t(t(result.prelim$X0)%*%as.matrix(v*X)),1,sum))),df=1,lower.tail=F)
   #p[is.na(p)]<-NA
   return(as.matrix(p))
@@ -625,16 +688,11 @@ Get.p<-function(X,result.prelim){
   outcome<-result.prelim$out_type
   if(outcome=='D'){
     invisible(capture.output(
-      p <- ScoreTest_SPA(t(X), result.prelim$Y, result.prelim$X,
+      p <- ScoreTest_SPA(t(X), result.prelim$Y, result.prelim$X0,
                          method = c("fastSPA"), minmac = -Inf)$p.value
     ))
   }else{
-    v<-rep(as.numeric(var(Y.res)),nrow(X))
-    A<-(t(X)%*%Y.res)^2
-    B<-colSums(v*X^2)
-    C<-t(X)%*%(v*result.prelim$X0)%*%result.prelim$inv.X0
-    D<-t(t(result.prelim$X0)%*%as.matrix(v*X))
-    p<-pchisq(as.numeric(A/(B-rowSums(C*D))),df=1,lower.tail=F)
+    p <- .kp_continuous_score_p(X, result.prelim)
     #p<-pchisq(as.numeric((t(X)%*%Y.res)^2/(apply(X*(v*X),2,sum)-apply(t(X)%*%(v*result.prelim$X0)%*%result.prelim$inv.X0*t(t(result.prelim$X0)%*%as.matrix(v*X)),1,sum))),df=1,lower.tail=F)
   }
   return(as.matrix(p))

@@ -17,6 +17,10 @@ run_single_block <- function(
   genome_build,
   reference_id        = NULL,
   plink_keep_file     = NULL,
+  export_switch       = NULL,
+  plink_threads       = NULL,
+  temp_dir            = NULL,
+  thres.ultrarare     = 25,
   knockoff_seed       = NULL,
   save_knockoff       = FALSE,
   load_knockoff       = FALSE,
@@ -37,14 +41,20 @@ run_single_block <- function(
   ]
   if (nrow(block_bim) == 0L) return(NULL)
 
-  tmpdir       <- tempdir()
-  block_prefix <- file.path(tmpdir, sprintf("temp_chr%d_block%d", chr, kk))
+  tmpdir <- if (is.null(temp_dir)) tempdir() else temp_dir
+  if (!dir.exists(tmpdir) &&
+      !dir.create(tmpdir, recursive = TRUE, showWarnings = FALSE))
+    stop("Unable to create temporary directory: ", tmpdir)
+  block_prefix <- tempfile(
+    sprintf("KnockoffPipeline_chr%d_block%d_", chr, kk), tmpdir = tmpdir
+  )
   keep_arg <- if (is.null(plink_keep_file)) "" else
     paste("--keep", shQuote(plink_keep_file))
   status <- .run_plink_additive_export(
     plink_prefix = plink_prefix, geno_file = geno.file, chr = chr,
     start = start, stop = stop, keep_arg = keep_arg,
-    out_prefix = block_prefix
+    out_prefix = block_prefix, export_switch = export_switch,
+    plink_threads = plink_threads
   )
   if (!identical(status, 0L))
     stop("PLINK failed while exporting chr", chr, ":", start, "-", stop, ".")
@@ -67,15 +77,34 @@ run_single_block <- function(
   rm(raw)
   cat(sprintf("chr: %s, start: %d, end: %d, snp count: %d\n", chr, start, stop, ncol(df)))
 
+  imputation_seed <- .derive_unit_seed(knockoff_seed, "imputation")
+  preprocess <- .with_local_seed(
+    imputation_seed,
+    function() Preprocess(
+      geno = df, chr = chr, window = window_length,
+      impute.method = impute.method,
+      variant_metadata = variant_metadata,
+      thres.ultrarare = thres.ultrarare
+    )
+  )
+  # The PLINK data frame and dense input matrix are not needed once the sparse
+  # preprocessed representation has been built.  Releasing them here prevents
+  # each worker from retaining an extra n-by-p matrix throughout knockoff
+  # generation and association testing.
+  rm(prepared, df, variant_metadata)
+  gc(verbose = FALSE)
+  if (is.null(preprocess)) return(NULL)
+
   results <- Single_Window_Analysis(
       nullobj             = obj_nullmodel,
-      geno                = df,
+      geno                = NULL,
       chr                 = chr,
       window_length       = window_length,
       M                   = M,
       impute.method       = impute.method,
+      thres.ultrarare     = thres.ultrarare,
       Gsub.id             = Gsub.id,
-      variant_metadata    = variant_metadata,
+      variant_metadata    = NULL,
       genome_build        = genome_build,
       reference_id        = reference_id,
       knockoff_seed       = knockoff_seed,
@@ -83,9 +112,10 @@ run_single_block <- function(
       load_knockoff       = load_knockoff,
       knockoff_file       = knockoff_file,
       knockoff_sample_ids = knockoff_sample_ids,
-      stage1_only         = stage1_only
+      stage1_only         = stage1_only,
+      .preprocessed       = preprocess
     )
-  rm(df); gc()
+  rm(preprocess); gc(verbose = FALSE)
   return(results)
 }
 
@@ -129,16 +159,23 @@ Single_Window_Analysis <- function(
   load_knockoff       = FALSE,
   knockoff_file       = NULL,
   knockoff_sample_ids = NULL,
-  stage1_only         = FALSE
+  stage1_only         = FALSE,
+  .preprocessed       = NULL
 ) {
   imputation_seed <- .derive_unit_seed(knockoff_seed, "imputation")
-  preprocess <- .with_local_seed(
-    imputation_seed,
-    function() Preprocess(
-      geno = geno, chr = chr, window = window_length,
-      impute.method = impute.method, variant_metadata = variant_metadata
+  preprocess <- .preprocessed
+  if (is.null(preprocess)) {
+    if (is.null(geno)) stop("'geno' is required when '.preprocessed' is NULL.")
+    preprocess <- .with_local_seed(
+      imputation_seed,
+      function() Preprocess(
+        geno = geno, chr = chr, window = window_length,
+        impute.method = impute.method,
+        variant_metadata = variant_metadata,
+        thres.ultrarare = thres.ultrarare
+      )
     )
-  )
+  }
   if (is.null(preprocess)) return(NULL)
 
   G          <- preprocess$G
@@ -149,9 +186,11 @@ Single_Window_Analysis <- function(
     test_type = "Single_Window", M = M, genome_build = genome_build,
     variant_metadata = variant_metadata, reference_id = reference_id,
     construction_id = paste0(
-      "KnockoffScreen-SCIP-v1;impute=", impute.method,
+      "KnockoffScreen-SCIP-v2;prefilter_minor_MAC;impute=", impute.method,
       ";imputation_seed=", if (is.null(imputation_seed)) "NULL" else imputation_seed,
-      ";corr_max=0.75;maxBP=100000;thres_ultrarare=25;R2=1;method=shrinkage"
+      ";corr_max=0.75;maxBP=100000;thres_ultrarare=",
+      format(thres.ultrarare, scientific = FALSE, trim = TRUE),
+      ";R2=1;method=shrinkage"
     ),
     random_seed = knockoff_seed
   )
@@ -231,7 +270,8 @@ Single_Window_Analysis <- function(
       .derive_unit_seed(knockoff_seed, "knockoff"),
       function() create.KS(
         X = G, pos = pos, M = M, bigmemory = bigmemory,
-        backing_path = backing_path, backing_prefix = backing_prefix
+        backing_path = backing_path, backing_prefix = backing_prefix,
+        thres.ultrarare = thres.ultrarare
       )
     )
 
@@ -274,6 +314,7 @@ Single_Window_Analysis <- function(
     input.G_k     = G_k,
     M             = M,
     thres.single  = thres.single,
+    thres.ultrarare = thres.ultrarare,
     Gsub.id       = Gsub.id
   )
   rm(G_k, G, pos, window.bed); gc()
@@ -284,12 +325,11 @@ Single_Window_Analysis <- function(
 # Preprocess -----------------------------------------------------------------
 Preprocess <- function(geno, chr, window = NULL, thres.maf = 0,
                        thres.missing = 0.1, impute.method = "fixed",
-                       variant_metadata = NULL) {
+                       variant_metadata = NULL, thres.ultrarare = 25) {
 
   G <- as.matrix(geno)
   if (is.null(variant_metadata) || nrow(variant_metadata) != ncol(G))
     stop("variant_metadata must contain one row per genotype column.")
-  G <- 2 - G
 
   if (length(G) == 0 || ncol(G) == 0) {
     warning("Number of variants in the specified range is 0", call. = FALSE)
@@ -299,36 +339,60 @@ Preprocess <- function(geno, chr, window = NULL, thres.maf = 0,
     warning("Number of variants in the specified range is 1", call. = FALSE)
     return(NULL)   # FIX: was `next`
   }
+  if (!is.numeric(thres.ultrarare) || length(thres.ultrarare) != 1L ||
+      is.na(thres.ultrarare) || !is.finite(thres.ultrarare) ||
+      thres.ultrarare < 0)
+    stop("'thres.ultrarare' must be one non-negative finite number.")
+
+  # PLINK hard calls arrive as integers.  Preserve that compact representation
+  # until fractional imputation actually requires doubles.
+  G <- if (is.integer(G)) 2L - G else 2 - G
 
   variant_key <- paste(
     variant_metadata$chr, variant_metadata$variant_id, variant_metadata$pos,
     variant_metadata$a1, variant_metadata$a2, sep = ":"
   )
   unique_variant <- match(unique(variant_key), variant_key)
-  G <- G[, unique_variant, drop = FALSE]
-  variant_metadata <- variant_metadata[unique_variant, , drop = FALSE]
+  if (!identical(unique_variant, seq_len(ncol(G)))) {
+    G <- G[, unique_variant, drop = FALSE]
+    variant_metadata <- variant_metadata[unique_variant, , drop = FALSE]
+  }
 
   # Missing imputation
-  G[G < 0 | G > 2] <- NA
+  observed_range <- suppressWarnings(range(G, na.rm = TRUE))
+  if (length(observed_range) == 2L && all(is.finite(observed_range)) &&
+      (observed_range[1L] < 0 || observed_range[2L] > 2)) {
+    bad <- G < 0 | G > 2
+    G[bad] <- NA
+    rm(bad)
+  }
   G <- Impute(G, impute.method)
 
   # Filter constant variants
   s <- apply(G, 2, sd)
   keep_variable <- !is.na(s) & s != 0
-  G <- G[, keep_variable, drop = FALSE]
-  variant_metadata <- variant_metadata[keep_variable, , drop = FALSE]
+  if (!all(keep_variable)) {
+    G <- G[, keep_variable, drop = FALSE]
+    variant_metadata <- variant_metadata[keep_variable, , drop = FALSE]
+  }
   if (ncol(G) < 2) return(NULL)
 
   # Reorder by position
   pos <- as.numeric(variant_metadata$pos)
   pos_order <- order(pos, variant_metadata$variant_id)
-  G <- G[, pos_order, drop = FALSE]
-  variant_metadata <- variant_metadata[pos_order, , drop = FALSE]
-  pos <- pos[pos_order]
+  if (!identical(pos_order, seq_len(ncol(G)))) {
+    G <- G[, pos_order, drop = FALSE]
+    variant_metadata <- variant_metadata[pos_order, , drop = FALSE]
+    pos <- pos[pos_order]
+  }
+  start <- min(pos); end <- max(pos)
   MAF <- colMeans(G) / 2
-  G   <- as.matrix(G)
   flip_to_minor <- MAF > 0.5 & !is.na(MAF)
-  G[, flip_to_minor] <- 2 - G[, flip_to_minor, drop = FALSE]
+  if (any(flip_to_minor)) {
+    complement <- if (is.integer(G)) 2L else 2
+    G[, flip_to_minor] <-
+      complement - G[, flip_to_minor, drop = FALSE]
+  }
   variant_metadata$coded_allele <- ifelse(
     flip_to_minor, variant_metadata$counted_allele,
     ifelse(variant_metadata$counted_allele == variant_metadata$a1,
@@ -336,26 +400,46 @@ Preprocess <- function(geno, chr, window = NULL, thres.maf = 0,
   )
   MAF <- colMeans(G) / 2
   MAC <- colSums(G)
-  G   <- Matrix::Matrix(G, sparse = TRUE)
+
+  # Filter on the final analysis sample set before knockoff construction.  The
+  # observed matrix, positions, allele metadata and generated knockoffs then
+  # have one common column index by construction.
+  keep_mac <- is.finite(MAF) & MAF > thres.maf &
+    is.finite(MAC) & MAC >= thres.ultrarare
+  if (!all(keep_mac)) {
+    G <- G[, keep_mac, drop = FALSE]
+    MAF <- MAF[keep_mac]
+    MAC <- MAC[keep_mac]
+    pos <- pos[keep_mac]
+    variant_metadata <- variant_metadata[keep_mac, , drop = FALSE]
+  }
+  if (ncol(G) < 2L) return(NULL)
+
+  G <- Matrix::Matrix(G, sparse = TRUE)
 
   colnames(G) <- pos
-  start <- min(pos); end <- max(pos)
 
   # Clustering to remove highly correlated SNPs
-  cor.X      <- sparse.cor(Matrix::Matrix(G))$cor
+  cor.X <- .kp_sparse_cov_cor(
+    G, need_cov = FALSE, need_cor = TRUE
+  )$cor
   Sigma.dist <- as.dist(1 - abs(cor.X))
   fit_clust  <- hclust(Sigma.dist, method = "single")
   clusters   <- cutree(fit_clust, h = 1 - 0.75)
 
   cluster.idx <- match(unique(clusters), clusters)
-  G   <- G[, cluster.idx, drop = FALSE]
-  MAF <- MAF[cluster.idx]; MAC <- MAC[cluster.idx]; pos <- pos[cluster.idx]
-  variant_metadata <- variant_metadata[cluster.idx, , drop = FALSE]
+  if (!identical(cluster.idx, seq_len(ncol(G)))) {
+    G   <- G[, cluster.idx, drop = FALSE]
+    MAF <- MAF[cluster.idx]; MAC <- MAC[cluster.idx]; pos <- pos[cluster.idx]
+    variant_metadata <- variant_metadata[cluster.idx, , drop = FALSE]
+  }
 
   unique.idx <- match(unique(pos), pos)
-  G   <- G[, unique.idx, drop = FALSE]
-  MAF <- MAF[unique.idx]; MAC <- MAC[unique.idx]; pos <- pos[unique.idx]
-  variant_metadata <- variant_metadata[unique.idx, , drop = FALSE]
+  if (!identical(unique.idx, seq_len(ncol(G)))) {
+    G   <- G[, unique.idx, drop = FALSE]
+    MAF <- MAF[unique.idx]; MAC <- MAC[unique.idx]; pos <- pos[unique.idx]
+    variant_metadata <- variant_metadata[unique.idx, , drop = FALSE]
+  }
 
   if (ncol(G) < 2) return(NULL)
 

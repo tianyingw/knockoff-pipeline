@@ -337,7 +337,7 @@ test_that("random imputation is deterministic under a derived unit seed", {
     KnockoffPipeline:::.derive_unit_seed(seed, "imputation"),
     function() KnockoffPipeline:::Preprocess(
       geno, chr = 1L, window = 100L, impute.method = "random",
-      variant_metadata = variants
+      variant_metadata = variants, thres.ultrarare = 0
     )
   )
 

@@ -113,7 +113,9 @@ utils::globalVariables(c('G_gene_buffer_surround','LD.filter',
 
   repeat {
     if (ncol(X) <= 1L) break
-    cor_X <- as.matrix(sparse.cor(Matrix::Matrix(X, sparse = TRUE))$cor)
+    cor_X <- .kp_sparse_cov_cor(
+      Matrix::Matrix(X, sparse = TRUE), need_cov = FALSE, need_cor = TRUE
+    )$cor
     diag(cor_X) <- 0
     max_corr <- suppressWarnings(max(abs(cor_X), na.rm = TRUE))
     if (!is.finite(max_corr) || max_corr < LD_filter) break
@@ -409,7 +411,7 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     # must fingerprint every predictor, not only the returned buffer columns.
     variant_metadata = variant_metadata_filter,
     reference_id = reference_id,
-    construction_id = "BIGKnock-gene-buffer-v3;impute=fixed;batch_flank=50000;gene_buffer=5000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
+    construction_id = "BIGKnock-gene-buffer-v4;corrected_skip_index;impute=fixed;batch_flank=50000;gene_buffer=5000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
     random_seed = knockoff_seed
   )
 
@@ -693,8 +695,9 @@ create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_
                                               thres.ultrarare=25,R2.thres=LD.filter) {
 
   method='shrinkage'
-  sparse.fit<-sparse.cor(X)
-  cor.X<-sparse.fit$cor;cov.X<-sparse.fit$cov  #correlation
+  cor.X <- .kp_sparse_cov_cor(
+    X, need_cov = FALSE, need_cor = TRUE
+  )$cor
 
   #svd to get leverage score, can be optimized;update: tried fast leveraging, but the R matrix is singular possibly because X is sparse.
   #Fast Truncated Singular Value Decomposition
@@ -707,9 +710,10 @@ create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_
   X.AL<-w*X[index.AL, , drop = FALSE] #n.AL samples
   sum(is.na(X.AL)) #0
 
-  sparse.fit<-sparse.cor(X.AL)
-  cor.X.AL<-sparse.fit$cor;cov.X.AL<-sparse.fit$cov
-  skip.index<-colSums(X.AL!=0)<=thres.ultrarare #skip features that are ultra sparse, permutation will be directly applied to generate knockoffs
+  cov.X.AL <- .kp_sparse_cov_cor(
+    X.AL, need_cov = TRUE, need_cor = FALSE
+  )$cov
+  skip.index <- which(colSums(X.AL != 0) <= thres.ultrarare)
 
   Sigma.distance = as.dist(1 - abs(cor.X))
   if(ncol(X)>1){
@@ -766,8 +770,10 @@ create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_
 
           temp.xy<-rbind(mean(y.AL),crossprod(x.AL,y.AL)/length(y.AL)-colMeans(x.AL)*mean(y.AL))
           temp.xy<-rbind(temp.xy,crossprod(x.exist.AL,y.AL)/length(y.AL)-colMeans(x.exist.AL)*mean(y.AL))
-          temp.cov.cross<-sparse.cov.cross(x.AL,x.exist.AL)$cov
-          temp.cov<-sparse.cor(x.exist.AL)$cov
+          temp.cov.cross <- .kp_sparse_cross_cov(x.AL, x.exist.AL)
+          temp.cov <- .kp_sparse_cov_cor(
+            x.exist.AL, need_cov = TRUE, need_cor = FALSE
+          )$cov
           temp.xx<-cov.X.AL[index,index]
           temp.xx<-rbind(cbind(temp.xx,temp.cov.cross),cbind(t(temp.cov.cross),temp.cov))
           temp.xx<-cbind(0,temp.xx)
@@ -831,8 +837,9 @@ create.MK.AL_enhancer <- function(X=G_enhancer_surround,pos,enhancer_start,enhan
                                   thres.ultrarare=25,R2.thres=0.75) {
 
   method='shrinkage'
-  sparse.fit<-sparse.cor(X)
-  cor.X<-sparse.fit$cor;cov.X<-sparse.fit$cov
+  cor.X <- .kp_sparse_cov_cor(
+    X, need_cov = FALSE, need_cor = TRUE
+  )$cor
 
   #svd to get leverage score, can be optimized;update: tried fast leveraging, but the R matrix is singular possibly because X is sparse.
   if(method=='shrinkage'){
@@ -842,9 +849,10 @@ create.MK.AL_enhancer <- function(X=G_enhancer_surround,pos,enhancer_start,enhan
   index.AL<-sample(1:nrow(X),min(n.AL,nrow(X)),replace = FALSE,prob=prob)
   w<-1/sqrt(n.AL*prob[index.AL])
   X.AL<-w*X[index.AL, , drop = FALSE]
-  sparse.fit<-sparse.cor(X.AL)
-  cor.X.AL<-sparse.fit$cor;cov.X.AL<-sparse.fit$cov
-  skip.index<-colSums(X.AL!=0)<=thres.ultrarare #skip features that are ultra sparse, permutation will be directly applied to generate knockoffs
+  cov.X.AL <- .kp_sparse_cov_cor(
+    X.AL, need_cov = TRUE, need_cor = FALSE
+  )$cov
+  skip.index <- which(colSums(X.AL != 0) <= thres.ultrarare)
 
   Sigma.distance = as.dist(1 - abs(cor.X))
   if(ncol(X)>1){
@@ -901,8 +909,10 @@ create.MK.AL_enhancer <- function(X=G_enhancer_surround,pos,enhancer_start,enhan
 
           temp.xy<-rbind(mean(y.AL),crossprod(x.AL,y.AL)/length(y.AL)-colMeans(x.AL)*mean(y.AL))
           temp.xy<-rbind(temp.xy,crossprod(x.exist.AL,y.AL)/length(y.AL)-colMeans(x.exist.AL)*mean(y.AL))
-          temp.cov.cross<-sparse.cov.cross(x.AL,x.exist.AL)$cov
-          temp.cov<-sparse.cor(x.exist.AL)$cov
+          temp.cov.cross <- .kp_sparse_cross_cov(x.AL, x.exist.AL)
+          temp.cov <- .kp_sparse_cov_cor(
+            x.exist.AL, need_cov = TRUE, need_cor = FALSE
+          )$cov
           temp.xx<-cov.X.AL[index,index]
           temp.xx<-rbind(cbind(temp.xx,temp.cov.cross),cbind(t(temp.cov.cross),temp.cov))
           temp.xx<-cbind(0,temp.xx)
@@ -1044,9 +1054,7 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   # pseudoinverse of t(X) %*% (v*X) (use precomputed if provided)
   if (!is.null(inv_vX_precomputed)) {
     inv_vX <- inv_vX_precomputed
-    message("  [BigKnock] using precomputed inv_vX")
   } else {
-    message("  [BigKnock] computing inv_vX (no precomputed)")
     vX_mat <- t(X) %*% (v * X)
     inv_vX <- tryCatch({
       s <- svd(vX_mat)
@@ -1540,17 +1548,9 @@ percent <- function(x, digits = 3, format = "f", ...) {
   paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
 }
 sparse.cor <- function(x){
-  n <- nrow(x)
-  cMeans <- colMeans(x)
-  covmat <- (as.matrix(crossprod(x)) - n*tcrossprod(cMeans))/(n-1)
-  sdvec <- sqrt(diag(covmat))
-  cormat <- covmat/tcrossprod(sdvec)
-  list(cov=covmat,cor=cormat)
+  .kp_sparse_cov_cor(x, need_cov = TRUE, need_cor = TRUE)
 }
 sparse.cov.cross <- function(x,y){
-  n <- nrow(x)
-  cMeans.x <- colMeans(x);cMeans.y <- colMeans(y)
-  covmat <- (as.matrix(crossprod(x,y)) - n*tcrossprod(cMeans.x,cMeans.y))/(n-1)
-  list(cov=covmat)
+  list(cov = .kp_sparse_cross_cov(x, y))
 }
 max_nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
