@@ -759,8 +759,10 @@ Get.p<-function(X,result.null.model){
    outcome<-result.null.model$out_type
    if(outcome=='D'){
       invisible(capture.output(
-         p <- ScoreTest_SPA(t(X), result.null.model$Y, result.null.model$X,
-                            method = c("fastSPA"), minmac = -Inf)$p.value
+         p <- WGScan::ScoreTest_SPA(
+            t(X), result.null.model$Y, result.null.model$X,
+            method = c("fastSPA"), minmac = -Inf
+         )$p.value
       ))
    }else{
       v<-rep(as.numeric(var(Y.res)),nrow(X))
@@ -905,39 +907,6 @@ Get.cauchy<-function(p){
       return(1-pcauchy(cct.stat))
    }
 }
-Impute<-function(Z, impute.method){
-   p<-dim(Z)[2]
-   if(impute.method =="random"){
-      for(i in 1:p){
-         IDX<-which(is.na(Z[,i]))
-         if(length(IDX) > 0){
-            maf1<-mean(Z[-IDX,i])/2
-            Z[IDX,i]<-rbinom(length(IDX),2,maf1)
-         }
-      }
-   } else if(impute.method =="fixed"){
-      for(i in 1:p){
-         IDX<-which(is.na(Z[,i]))
-         if(length(IDX) > 0){
-            maf1<-mean(Z[-IDX,i])/2
-            Z[IDX,i]<-2 * maf1
-         }
-      }
-   } else if(impute.method =="bestguess") {
-      for(i in 1:p){
-         IDX<-which(is.na(Z[,i]))
-         if(length(IDX) > 0){
-            maf1<-mean(Z[-IDX,i])/2
-            Z[IDX,i]<-round(2 * maf1)
-         }
-      }
-   } else {
-      stop("Error: Imputation method shoud be \"fixed\", \"random\" or \"bestguess\" ")
-   }
-   return(as.matrix(Z))
-}
-
-
 # =============================================================================
 # PATCH for GeneScan3DKnock.R
 # Replace the single function GeneScan3D.KnockoffGeneration
@@ -1016,30 +985,32 @@ GeneScan3D.KnockoffGeneration <- function(
 
   # IDs in matched row order
   matched_ids <- if (!is.null(Gsub.id)) Gsub.id[match.index] else match.index
-  if(mean(is.na(match.index))>0){
-      msg<-sprintf("Some individuals are not matched with genotype. The rate is%f", mean(is.na(match.index)))
-      warning(msg,call.=F)
-   }
   # ---- QC: gene buffer surround -------------------------------------------
-  G_gene_buffer_surround <- Matrix::Matrix(G_gene_buffer_surround[match.index, ])
+  if (!identical(match.index, seq_len(nrow(G_gene_buffer_surround)))) {
+    G_gene_buffer_surround <-
+      G_gene_buffer_surround[match.index, , drop = FALSE]
+  }
+  G_gene_buffer_surround <- Matrix::Matrix(G_gene_buffer_surround)
   G_gene_buffer_surround[G_gene_buffer_surround == -9 |
                          G_gene_buffer_surround ==  9] <- NA
-  N_MISS    <- sum(is.na(G_gene_buffer_surround))
-  MISS.freq <- apply(is.na(G_gene_buffer_surround), 2, mean)
+  missing_mask <- is.na(G_gene_buffer_surround)
+  N_MISS    <- sum(missing_mask)
+  MISS.freq <- .kp_col_means(missing_mask)
+  rm(missing_mask)
   if (N_MISS > 0) {
     warning(sprintf("Missing genotype rate = %f. Imputation applied.",
                     N_MISS / nrow(G_gene_buffer_surround) / ncol(G_gene_buffer_surround)),
             call. = FALSE)
     G_gene_buffer_surround <- Impute(G_gene_buffer_surround, impute.method)
   }
-  MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
+  MAF       <- .kp_col_means(G_gene_buffer_surround) / 2
   flip_to_minor <- MAF > 0.5 & !is.na(MAF)
   G_gene_buffer_surround[, flip_to_minor] <-
     2 - G_gene_buffer_surround[, flip_to_minor, drop = FALSE]
-  MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
-  MAC       <- apply(G_gene_buffer_surround, 2, sum)
-  s         <- apply(G_gene_buffer_surround, 2, sd)
-  SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
+  MAF       <- .kp_col_means(G_gene_buffer_surround) / 2
+  variance  <- .kp_col_means(G_gene_buffer_surround^2) -
+    .kp_col_means(G_gene_buffer_surround)^2
+  SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
   if (length(SNP.index) <= 1) {
     warning("Number of variants passing QC in gene buffer surround is <=1", call. = FALSE)
     return(NULL)
@@ -1068,20 +1039,21 @@ GeneScan3D.KnockoffGeneration <- function(
     variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
   ]
   if (length(positions_gene_buffer) == 0) return(NULL)
-  gene_buffer_index <-
-    variants_gene_buffer_surround_filter <= gene_buffer.pos[2] &
-    variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
-  current_context <- .make_knockoff_context(
-    test_type = "Gene_Centric_GLM",
-    M = M,
-    genome_build = genome_build,
-    # Construction uses the complete post-QC surround matrix, so safe reuse
-    # must fingerprint every predictor, not only the returned buffer columns.
-    variant_metadata = variant_metadata_filter,
-    reference_id = reference_id,
-    construction_id = "GeneScan3DKnock-gene-buffer-v2;corrected_skip_index;impute=fixed;corr_max=0.75;maxBP=10000;corr_base=0.05;thres_ultrarare=25;R2=0.75",
-    random_seed = knockoff_seed
-  )
+  current_context <- if (isTRUE(save_knockoff) || isTRUE(load_knockoff)) {
+    .make_knockoff_context(
+      test_type = "Gene_Centric_GLM",
+      M = M,
+      genome_build = genome_build,
+      # Construction uses the complete post-QC surround matrix, so safe reuse
+      # must fingerprint every predictor, not only the returned buffer columns.
+      variant_metadata = variant_metadata_filter,
+      reference_id = reference_id,
+      construction_id = "GeneScan3DKnock-gene-buffer-v2;corrected_skip_index;impute=fixed;corr_max=0.75;maxBP=10000;corr_base=0.05;thres_ultrarare=25;R2=0.75",
+      random_seed = knockoff_seed
+    )
+  } else {
+    list(M = as.integer(M))
+  }
 
   # ---- Gene buffer knockoff: save / load / generate -----------------------
   # create.MK.AL_gene_buffer takes the POST-QC surround matrix as input.
@@ -1173,22 +1145,28 @@ GeneScan3D.KnockoffGeneration <- function(
       }
 
       # QC: enhancer surround
-      G_Enh_surround <- Matrix::Matrix(G_Enh_surround[match.index, ])
+      if (!identical(match.index, seq_len(nrow(G_Enh_surround)))) {
+        G_Enh_surround <- G_Enh_surround[match.index, , drop = FALSE]
+      }
+      G_Enh_surround <- Matrix::Matrix(G_Enh_surround)
       G_Enh_surround[G_Enh_surround == -9 | G_Enh_surround == 9] <- NA
-      N_MISS    <- sum(is.na(G_Enh_surround))
-      MISS.freq <- apply(is.na(G_Enh_surround), 2, mean)
+      missing_mask <- is.na(G_Enh_surround)
+      N_MISS    <- sum(missing_mask)
+      MISS.freq <- .kp_col_means(missing_mask)
+      rm(missing_mask)
       if (N_MISS > 0) {
         warning(sprintf("Enhancer %d: missing rate = %f. Imputation applied.", r,
                         N_MISS / nrow(G_Enh_surround) / ncol(G_Enh_surround)),
                 call. = FALSE)
         G_Enh_surround <- Impute(G_Enh_surround, impute.method)
       }
-      MAF       <- apply(G_Enh_surround, 2, mean) / 2
+      MAF       <- .kp_col_means(G_Enh_surround) / 2
       G_Enh_surround[, MAF > 0.5 & !is.na(MAF)] <-
         2 - G_Enh_surround[, MAF > 0.5 & !is.na(MAF)]
-      MAF       <- apply(G_Enh_surround, 2, mean) / 2
-      s         <- apply(G_Enh_surround, 2, sd)
-      SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
+      MAF       <- .kp_col_means(G_Enh_surround) / 2
+      variance  <- .kp_col_means(G_Enh_surround^2) -
+        .kp_col_means(G_Enh_surround)^2
+      SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
       if (length(SNP.index) <= 1) {
         warning(sprintf("Enhancer %d: variants passing QC <=1; skipping.", r), call. = FALSE)
         next
@@ -1463,7 +1441,6 @@ create.MK.AL_gene_buffer <- function(X=G_gene_buffer_surround,pos,gene_buffer_st
                x<-X[,index,drop=F]
                temp.j<-1
                fitted.values<-temp.beta[1]+x%*%temp.beta[(temp.j+1):(temp.j+ncol(x)),,drop=F]-sum(colMeans(x)*temp.beta[(temp.j+1):(temp.j+ncol(x)),,drop=F])
-               length(fitted.values) #n samples
                
                if(length(intersect(index,index.exist))!=0){
                   temp.j<-temp.j+ncol(x)
@@ -1635,11 +1612,4 @@ create.MK.AL_Enhancer <- function(X=G_Enhancer_surround,pos,Enhancer_start,Enhan
       G_Enhancer_knockoff[j, ,] <-X_k[[j]][,snps_ind]
    }
    return(G_Enhancer_knockoff)
-}
-
-sparse.cor <- function(x){
-   .kp_sparse_cov_cor(x, need_cov = TRUE, need_cor = TRUE)
-}
-sparse.cov.cross <- function(x,y){
-   list(cov = .kp_sparse_cross_cov(x, y))
 }

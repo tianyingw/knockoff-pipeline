@@ -162,7 +162,7 @@
 #' )
 #' }
 #'
-#' @import SKAT Matrix WGScan SPAtest CompQuadForm irlba bigmemory
+#' @import SKAT Matrix WGScan CompQuadForm irlba bigmemory
 #' @import data.table parallel qqman abind SAIGE
 #' @importFrom graphics abline
 #' @importFrom grDevices dev.off png
@@ -1408,6 +1408,7 @@ run_pipeline <- function(
   if (length(unique_chr) == 0L) stop("No chromosomes remain.")
   last_chr <- utils::tail(unique_chr, 1L)
   last_merge <- NULL
+  glmm_precomputed <- NULL
 
   for (c in unique_chr) {
     message("--- chr ", c, " (Gene_Centric) ---")
@@ -1453,6 +1454,14 @@ run_pipeline <- function(
       next
     }
 
+    # These matrices depend on the phenotype/null model, not on chromosome,
+    # batch, or gene.  Build them lazily so a fully resumed run does no work.
+    if (!sample_uncorrelated && is.null(glmm_precomputed)) {
+      glmm_precomputed <- .bigknock_glmm_precompute(
+        nullobj$result.null.model.GLMM, sparseSigma
+      )
+    }
+
     # Re-batch remaining genes
     batch_index     <- split(seq_len(nrow(chr_genes)),
                              ceiling(seq_len(nrow(chr_genes)) / batch_size))
@@ -1486,6 +1495,7 @@ run_pipeline <- function(
         gh_df               = gh_df,
         sparseSigma         = sparseSigma,
         ratio               = ratio,
+        glmm_precomputed    = glmm_precomputed,
         user_cores          = user_cores,
         save_knockoff       = save_knockoff,
         load_knockoff       = load_knockoff,

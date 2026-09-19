@@ -27,6 +27,7 @@ run_batch_gene <- function(
   gh_df,
   sparseSigma         = NULL,
   ratio               = NULL,
+  glmm_precomputed    = NULL,
   user_cores          = 1,
   save_knockoff       = FALSE,
   load_knockoff       = FALSE,
@@ -48,9 +49,7 @@ run_batch_gene <- function(
   gene_buffer_extension <- 5000 + 50000
   start_all    <- min(genes[kk_vec, start]) - gene_buffer_extension
   end_all      <- max(genes[kk_vec, end])   + gene_buffer_extension
-  batch_bim <- bim_metadata[
-    bim_metadata$pos >= start_all & bim_metadata$pos <= end_all, , drop = FALSE
-  ]
+  batch_bim <- .subset_bim_range(bim_metadata, start_all, end_all)
   # A gene batch can legitimately have no variants in the input dataset.
   # Skip that empty analysis unit before PLINK turns it into a no-output error.
   if (nrow(batch_bim) == 0L) return(NULL)
@@ -204,6 +203,7 @@ run_batch_gene <- function(
           Gsub.id                       = Gsub.id,
           sparseSigma                   = sparseSigma,
           ratio                         = ratio,
+          glmm_precomputed              = glmm_precomputed,
           variant_metadata_gene_buffer_surround = variant_metadata_gene,
           genome_build                  = genome_build,
           reference_id                  = reference_id,
@@ -232,17 +232,17 @@ run_batch_gene <- function(
       return(results)
 
     }, error = function(e) {
-      if (isTRUE(load_knockoff) || isTRUE(stage1_only)) stop(e)
-      message("  !! Gene ", genes[kk, id], " (chr ", chr, ") failed: ",
-              conditionMessage(e))
-      NULL
+      stop(
+        "Gene ", genes[kk, id], " (chr ", chr, ") failed: ",
+        conditionMessage(e), call. = FALSE
+      )
     })
   }
 
   out <- parallel::mclapply(kk_vec, safe_fun, mc.cores = user_cores)
   failed <- vapply(out, inherits, logical(1), what = "try-error")
   if (any(failed)) {
-    stop("Gene batch ", b, " failed while validating or loading saved knockoffs: ",
+    stop("Gene batch ", b, " failed: ",
          paste(as.character(out[failed]), collapse = "; "))
   }
   out <- Filter(Negate(is.null), out)
@@ -298,7 +298,9 @@ run_batch_gene <- function(
       )
     }
     row_map <- match(current_ids, saved_ids)
-    arr <- arr[, row_map, , drop = FALSE]
+    if (!identical(row_map, seq_along(current_ids))) {
+      arr <- arr[, row_map, , drop = FALSE]
+    }
     need_generate <- FALSE
   }
 

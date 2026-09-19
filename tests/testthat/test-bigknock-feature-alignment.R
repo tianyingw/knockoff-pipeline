@@ -21,6 +21,81 @@ make_bigknock_alignment_toy <- function() {
 }
 
 
+test_that("BIGKnock phenotype-level matrices match direct solves", {
+  x <- cbind(
+    intercept = 1,
+    covariate = seq(-1, 1, length.out = 8L)
+  )
+  sigma <- Matrix::Diagonal(nrow(x), x = seq(1, 2, length.out = nrow(x)))
+  null_model <- list(
+    X = x,
+    fitted.values = stats::plogis(seq(-0.8, 0.8, length.out = nrow(x))),
+    traitType = "D",
+    theta = 1
+  )
+
+  got <- KnockoffPipeline:::.bigknock_glmm_precompute(null_model, sigma)
+  sigma_inv_x <- solve(as.matrix(sigma), x)
+  v <- null_model$fitted.values * (1 - null_model$fitted.values)
+
+  expect_equal(unname(got$C), unname(solve(crossprod(x, sigma_inv_x))),
+               tolerance = 1e-10)
+  expect_equal(unname(got$inv_vX), unname(solve(crossprod(x, v * x))),
+               tolerance = 1e-10)
+  expect_identical(got$outcome, "D")
+})
+
+
+test_that("gene batches forward shared BIGKnock state and fail on gene errors", {
+  genes <- data.table::data.table(
+    chr = 1L, start = 100L, end = 200L, id = "GENE1"
+  )
+  bim <- data.frame(
+    chr = "1", variant_id = c("rs1", "rs2", "rs3"), cm = 0,
+    pos = c(110, 150, 190), a1 = "A", a2 = "G",
+    stringsAsFactors = FALSE
+  )
+  shared <- list(C = diag(1), inv_vX = diag(1), outcome = "C")
+
+  testthat::local_mocked_bindings(
+    .run_plink_additive_export = function(..., out_prefix) {
+      raw <- data.frame(
+        FID = c("s1", "s2"), IID = c("s1", "s2"),
+        PAT = 0, MAT = 0, SEX = 1, PHENOTYPE = -9,
+        rs1_A = c(0L, 1L), rs2_A = c(1L, 2L), rs3_A = c(2L, 0L),
+        check.names = FALSE
+      )
+      data.table::fwrite(raw, paste0(out_prefix, ".raw"))
+      0L
+    },
+    GeneScan3D.UKB.GLMM.KnockoffGeneration =
+      function(..., glmm_precomputed) {
+        expect_identical(glmm_precomputed, shared)
+        stop("deliberate gene failure")
+      },
+    .package = "KnockoffPipeline"
+  )
+
+  expect_error(
+    KnockoffPipeline:::run_batch_gene(
+      genes = genes, b = 1L, batch_index = list(1L),
+      geno.file = "unused", obj_nullmodel = list(), window_length = 100L,
+      plink_prefix = "unused", M = 1L, genome_build = "hg19",
+      Gsub.id = c("s1", "s2"), bim_metadata = bim,
+      abc_df = data.table::data.table(
+        TargetGene = character(), start = numeric(), end = numeric()
+      ),
+      gh_df = data.table::data.table(
+        gene = character(), GH_start = numeric(), GH_end = numeric()
+      ),
+      use_glmm = TRUE, sparseSigma = Matrix::Diagonal(2L), ratio = 1,
+      glmm_precomputed = shared, user_cores = 1L
+    ),
+    "Gene GENE1 .* deliberate gene failure"
+  )
+})
+
+
 test_that("BIGKnock leverage sampling handles one retained variant", {
   x <- Matrix::Matrix(matrix(rep(c(0, 1, 2, 1), 75L), ncol = 1L),
                       sparse = TRUE)

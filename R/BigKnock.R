@@ -249,8 +249,11 @@ utils::globalVariables(c('G_gene_buffer_surround','LD.filter',
       stop("Saved BIGKnock gene-buffer knockoff dimensions are incompatible: ",
            knockoff_file, ". Regenerate the knockoff.", call. = FALSE)
     }
+    if (!identical(row_map, seq_along(current_ids))) {
+      saved_arr <- saved_arr[, row_map, , drop = FALSE]
+    }
     generated <- list(
-      knockoff = saved_arr[, row_map, , drop = FALSE],
+      knockoff = saved_arr,
       selected_input_index = ko_obj$selected_input_index,
       positions = ko_obj$snp_pos
     )
@@ -288,6 +291,82 @@ utils::globalVariables(c('G_gene_buffer_surround','LD.filter',
   aligned
 }
 
+# Shared BIGKnock GLMM matrices ---------------------------------------------
+# X, fitted values, sparseSigma and theta are phenotype-level quantities.
+# Computing these two small generalized inverses for every gene needlessly
+# repeats the expensive sparseSigma solve.  Keep the calculation here so the
+# pipeline can do it once while direct callers still have the same fallback.
+.bigknock_svd_inverse <- function(x, label, ridge = 1e-2) {
+  tryCatch({
+    s <- svd(x)
+    keep <- s$d > 1e-10 * s$d[1L]
+    s$v[, keep, drop = FALSE] %*%
+      (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
+  }, error = function(e) {
+    message("  [BigKnock] ", label, " SVD failed, using ridge fallback")
+    solve(x + diag(ridge, nrow(x)))
+  })
+}
+
+
+.bigknock_glmm_precompute <- function(result.null.model, sparseSigma) {
+  if (is.null(result.null.model) || is.null(result.null.model$X))
+    stop("BIGKnock GLMM precomputation requires a fitted null model with X.",
+         call. = FALSE)
+  if (is.null(sparseSigma))
+    stop("BIGKnock GLMM precomputation requires sparseSigma.", call. = FALSE)
+
+  X <- result.null.model$X
+  if (nrow(sparseSigma) != nrow(X) || ncol(sparseSigma) != nrow(X))
+    stop("sparseSigma dimensions do not match the null-model samples.",
+         call. = FALSE)
+
+  invSigma_X <- .safe_solve_sparse(sparseSigma, X)
+  C <- .bigknock_svd_inverse(
+    t(X) %*% invSigma_X, label = "C matrix"
+  )
+
+  outcome <- as.character(result.null.model$traitType)[1L]
+  if (!outcome %in% c("C", "D"))
+    stop("BIGKnock null-model traitType must be 'C' or 'D'.", call. = FALSE)
+  if (outcome == "D") {
+    mu <- as.vector(result.null.model$fitted.values)
+    if (length(mu) != nrow(X))
+      stop("Null-model fitted values do not match X.", call. = FALSE)
+    v <- mu * (1 - mu)
+  } else {
+    theta <- as.numeric(result.null.model$theta)[1L]
+    if (!is.finite(theta) || theta <= 0)
+      stop("Continuous-trait BIGKnock requires a positive theta.",
+           call. = FALSE)
+    v <- 1 / theta
+  }
+  inv_vX <- .bigknock_svd_inverse(
+    t(X) %*% (v * X), label = "weighted-X matrix"
+  )
+
+  list(C = C, inv_vX = inv_vX, outcome = outcome)
+}
+
+
+.validate_bigknock_glmm_precompute <- function(precomputed, result.null.model) {
+  required <- c("C", "inv_vX", "outcome")
+  if (!is.list(precomputed) ||
+      !all(required %in% names(precomputed))) {
+    stop("Invalid BIGKnock GLMM precomputation object.", call. = FALSE)
+  }
+  p <- ncol(result.null.model$X)
+  expected_outcome <- as.character(result.null.model$traitType)[1L]
+  if (!identical(dim(precomputed$C), c(p, p)) ||
+      !identical(dim(precomputed$inv_vX), c(p, p)) ||
+      !identical(as.character(precomputed$outcome)[1L], expected_outcome)) {
+    stop("BIGKnock GLMM precomputation is incompatible with the null model.",
+         call. = FALSE)
+  }
+  precomputed
+}
+
+
 # GeneScan3D.UKB.GLMM.KnockoffGeneration ------------------------------------
 # Changes vs original:
 #  * save/load gene_buffer knockoff (via knockoff_file).
@@ -322,7 +401,8 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   load_knockoff                 = FALSE,
   knockoff_file                 = NULL,
   knockoff_sample_ids           = NULL,
-  stage1_only                   = FALSE
+  stage1_only                   = FALSE,
+  glmm_precomputed              = NULL
 ) {
   impute.method <- "fixed"
 
@@ -357,24 +437,31 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
   matched_ids <- if (!is.null(Gsub.id)) Gsub.id[match.index] else match.index
 
   # ---- QC: gene buffer surround -------------------------------------------
-  G_gene_buffer_surround <- Matrix::Matrix(G_gene_buffer_surround[match.index, ])
+  if (!identical(match.index, seq_len(nrow(G_gene_buffer_surround)))) {
+    G_gene_buffer_surround <-
+      G_gene_buffer_surround[match.index, , drop = FALSE]
+  }
+  G_gene_buffer_surround <- Matrix::Matrix(G_gene_buffer_surround)
   G_gene_buffer_surround[G_gene_buffer_surround == -9 |
                          G_gene_buffer_surround ==  9] <- NA
-  N_MISS    <- sum(is.na(G_gene_buffer_surround))
-  MISS.freq <- apply(is.na(G_gene_buffer_surround), 2, mean)
+  missing_mask <- is.na(G_gene_buffer_surround)
+  N_MISS    <- sum(missing_mask)
+  MISS.freq <- .kp_col_means(missing_mask)
+  rm(missing_mask)
   if (N_MISS > 0) {
     warning(sprintf("Missing genotype rate = %f. Imputation applied.",
                     N_MISS / nrow(G_gene_buffer_surround) / ncol(G_gene_buffer_surround)),
             call. = FALSE)
     G_gene_buffer_surround <- Impute(G_gene_buffer_surround, impute.method)
   }
-  MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
+  MAF       <- .kp_col_means(G_gene_buffer_surround) / 2
   flip_to_minor <- MAF > 0.5 & !is.na(MAF)
   G_gene_buffer_surround[, flip_to_minor] <-
     2 - G_gene_buffer_surround[, flip_to_minor, drop = FALSE]
-  MAF       <- apply(G_gene_buffer_surround, 2, mean) / 2
-  s         <- apply(G_gene_buffer_surround, 2, sd)
-  SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
+  MAF       <- .kp_col_means(G_gene_buffer_surround) / 2
+  variance  <- .kp_col_means(G_gene_buffer_surround^2) -
+    .kp_col_means(G_gene_buffer_surround)^2
+  SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
   if (length(SNP.index) <= 1) {
     warning("Number of variants passing QC in gene buffer surround is <=1", call. = FALSE)
     return(NULL)
@@ -403,17 +490,22 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     variants_gene_buffer_surround_filter >= gene_buffer.pos[1]
   ]
   if (length(positions_gene_buffer) == 0) return(NULL)
-  current_context <- .make_knockoff_context(
-    test_type = "Gene_Centric_GLMM",
-    M = M,
-    genome_build = genome_build,
-    # Construction uses the complete post-QC surround matrix, so safe reuse
-    # must fingerprint every predictor, not only the returned buffer columns.
-    variant_metadata = variant_metadata_filter,
-    reference_id = reference_id,
-    construction_id = "BIGKnock-gene-buffer-v4;corrected_skip_index;impute=fixed;batch_flank=50000;gene_buffer=5000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
-    random_seed = knockoff_seed
-  )
+  persistent_knockoff <- isTRUE(save_knockoff) || isTRUE(load_knockoff)
+  current_context <- if (persistent_knockoff) {
+    .make_knockoff_context(
+      test_type = "Gene_Centric_GLMM",
+      M = M,
+      genome_build = genome_build,
+      # Construction uses the complete post-QC surround matrix, so safe reuse
+      # must fingerprint every predictor, not only the returned buffer columns.
+      variant_metadata = variant_metadata_filter,
+      reference_id = reference_id,
+      construction_id = "BIGKnock-gene-buffer-v4;corrected_skip_index;impute=fixed;batch_flank=50000;gene_buffer=5000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
+      random_seed = knockoff_seed
+    )
+  } else {
+    list(M = as.integer(M))
+  }
 
   # ---- Gene buffer knockoff: save / load / generate -----------------------
   # BIGKnock performs an additional MAC/LD selection.  Its selected column
@@ -425,7 +517,7 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     matched_ids       = matched_ids,
     original_matrix   = G_gene_buffer_surround,
     input_positions   = variants_gene_buffer_surround_filter,
-    input_metadata    = variant_metadata_filter,
+    input_metadata    = if (persistent_knockoff) variant_metadata_filter else NULL,
     gen_fun           = function() .with_local_seed(
       .derive_unit_seed(knockoff_seed, "gene_buffer"),
       function() {
@@ -477,22 +569,28 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
       }
 
       # QC: enhancer surround
-      G_Enh_surround <- Matrix::Matrix(G_Enh_surround[match.index, ])
+      if (!identical(match.index, seq_len(nrow(G_Enh_surround)))) {
+        G_Enh_surround <- G_Enh_surround[match.index, , drop = FALSE]
+      }
+      G_Enh_surround <- Matrix::Matrix(G_Enh_surround)
       G_Enh_surround[G_Enh_surround == -9 | G_Enh_surround == 9] <- NA
-      N_MISS    <- sum(is.na(G_Enh_surround))
-      MISS.freq <- apply(is.na(G_Enh_surround), 2, mean)
+      missing_mask <- is.na(G_Enh_surround)
+      N_MISS    <- sum(missing_mask)
+      MISS.freq <- .kp_col_means(missing_mask)
+      rm(missing_mask)
       if (N_MISS > 0) {
         warning(sprintf("Enhancer %d: missing rate = %f. Imputation applied.", r,
                         N_MISS / nrow(G_Enh_surround) / ncol(G_Enh_surround)),
                 call. = FALSE)
         G_Enh_surround <- Impute(G_Enh_surround, impute.method)
       }
-      MAF       <- apply(G_Enh_surround, 2, mean) / 2
+      MAF       <- .kp_col_means(G_Enh_surround) / 2
       G_Enh_surround[, MAF > 0.5 & !is.na(MAF)] <-
         2 - G_Enh_surround[, MAF > 0.5 & !is.na(MAF)]
-      MAF       <- apply(G_Enh_surround, 2, mean) / 2
-      s         <- apply(G_Enh_surround, 2, sd)
-      SNP.index <- which(MAF > 0 & s != 0 & !is.na(MAF) & MISS.freq < 0.1)
+      MAF       <- .kp_col_means(G_Enh_surround) / 2
+      variance  <- .kp_col_means(G_Enh_surround^2) -
+        .kp_col_means(G_Enh_surround)^2
+      SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
       if (length(SNP.index) <= 1) {
         warning(sprintf("Enhancer %d: variants passing QC <=1; skipping.", r), call. = FALSE)
         next
@@ -538,26 +636,19 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
     }
   }
 
-  # ---- Precompute shared matrices (same X, v, sparseSigma for all genes) --
-  X_pre  <- result.null.model$X
-  mu_pre <- as.vector(result.null.model$fitted.values)
-  invSigma_X_pre <- .safe_solve_sparse(sparseSigma, X_pre)
-  C_mat_pre <- t(X_pre) %*% invSigma_X_pre
-  C_pre <- tryCatch({
-    s <- svd(C_mat_pre)
-    keep <- s$d > 1e-10 * s$d[1]
-    s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
-  }, error = function(e) solve(C_mat_pre + diag(1e-2, nrow(C_mat_pre))))
-
-  outcome_pre <- result.null.model$traitType
-  v_pre <- if (outcome_pre == 'D') as.numeric(mu_pre * (1 - mu_pre))
-           else 1 / result.null.model$theta[1]
-  vX_mat_pre <- t(X_pre) %*% (v_pre * X_pre)
-  inv_vX_pre <- tryCatch({
-    s <- svd(vX_mat_pre)
-    keep <- s$d > 1e-10 * s$d[1]
-    s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
-  }, error = function(e) solve(vX_mat_pre + diag(1e-2, nrow(vX_mat_pre))))
+  # Direct callers retain a local fallback; run_pipeline supplies the same
+  # phenotype-level object once to every gene and batch.
+  if (is.null(glmm_precomputed)) {
+    glmm_precomputed <- .bigknock_glmm_precompute(
+      result.null.model, sparseSigma
+    )
+  }
+  glmm_precomputed <- .validate_bigknock_glmm_precompute(
+    glmm_precomputed, result.null.model
+  )
+  C_pre       <- glmm_precomputed$C
+  inv_vX_pre  <- glmm_precomputed$inv_vX
+  outcome_pre <- glmm_precomputed$outcome
 
   # ---- Association tests ---------------------------------------------------
   tmp <- GeneScan3D.UKB.GLMM(
@@ -708,7 +799,6 @@ create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_
   index.AL<-sample(1:nrow(X),min(n.AL,nrow(X)),replace = FALSE,prob=prob) #sampling r samples from n samples, using shrinkage leveraging estimator
   w<-1/sqrt(n.AL*prob[index.AL])
   X.AL<-w*X[index.AL, , drop = FALSE] #n.AL samples
-  sum(is.na(X.AL)) #0
 
   cov.X.AL <- .kp_sparse_cov_cor(
     X.AL, need_cov = TRUE, need_cor = FALSE
@@ -722,7 +812,6 @@ create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_
     clusters = cutree(fit, h=1-corr_max)  #variants from two different clusters do not have a correlation greater than 0.75.
   }else{clusters<-1}
 
-  gc()
   X_k<-list()
   for(k in 1:M){
     X_k[[k]]<-matrix(0,nrow=nrow(X),ncol=ncol(X))
@@ -790,7 +879,6 @@ create.MK.AL_gene_buffer_bigknock <- function(X=G_gene_buffer_surround,pos,gene_
           x<-X[,index,drop=F]
           temp.j<-1
           fitted.values<-temp.beta[1]+x%*%temp.beta[(temp.j+1):(temp.j+ncol(x)),,drop=F]-sum(colMeans(x)*temp.beta[(temp.j+1):(temp.j+ncol(x)),,drop=F])
-          length(fitted.values) #n samples
 
           if(length(intersect(index,index.exist))!=0){
             temp.j<-temp.j+ncol(x)
@@ -997,21 +1085,15 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   Y.res<-as.vector(result.null.model.GLMM$residuals)
   X<-result.null.model.GLMM$X #covariates include intercept
 
-  # Use precomputed matrices if provided (avoid repeated SVD)
-  if (!is.null(C_precomputed)) {
-    C <- C_precomputed
-  } else {
-    invSigma_X_temp <- .safe_solve_sparse(sparseSigma, X)
-    C_mat <- t(X) %*% invSigma_X_temp
-    C <- tryCatch({
-      s <- svd(C_mat)
-      keep <- s$d > 1e-10 * s$d[1]
-      s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
-    }, error = function(e) {
-      message("  [BigKnock] C_mat SVD failed, using ridge fallback")
-      solve(C_mat + diag(1e-2, nrow(C_mat)))
-    })
+  # Direct calls can omit either cache; build the common pair once rather
+  # than maintaining a second implementation of the same sparse solve/SVD.
+  shared_precomputed <- NULL
+  if (is.null(C_precomputed) || is.null(inv_vX_precomputed)) {
+    shared_precomputed <- .bigknock_glmm_precompute(
+      result.null.model.GLMM, sparseSigma
+    )
   }
+  C <- if (is.null(C_precomputed)) shared_precomputed$C else C_precomputed
   #genotype filtering/checking/missing values imputation
   G_filter <- tryCatch(
     Genotype_filter(G, pos, impute.method = 'fixed'),
@@ -1052,18 +1134,10 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   if(outcome=='C'){v=1/result.null.model.GLMM$theta[1]} #phi is residual variance
 
   # pseudoinverse of t(X) %*% (v*X) (use precomputed if provided)
-  if (!is.null(inv_vX_precomputed)) {
-    inv_vX <- inv_vX_precomputed
+  inv_vX <- if (is.null(inv_vX_precomputed)) {
+    shared_precomputed$inv_vX
   } else {
-    vX_mat <- t(X) %*% (v * X)
-    inv_vX <- tryCatch({
-      s <- svd(vX_mat)
-      keep <- s$d > 1e-10 * s$d[1]
-      s$v[, keep, drop = FALSE] %*% (s$d[keep]^(-1) * t(s$u[, keep, drop = FALSE]))
-    }, error = function(e) {
-      message("  [BigKnock] SVD solve failed, using ridge fallback")
-      solve(vX_mat + diag(1e-2, nrow(vX_mat)))
-    })
+    inv_vX_precomputed
   }
 
   #covariate adjusted genotypes
@@ -1084,11 +1158,11 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
   #with SPA
   if(outcome=='D'){
     qtilde =S/sqrt(ratio) +as.vector(t(G_tilde)%*%mu)
-    #The term as.vector(t(G_tilde)%*%mu) would be removed in SPAtest:::Saddle_Prob
+    #The term as.vector(t(G_tilde)%*%mu) would be removed in SPAtest::Saddle_Prob
     #keep the ratio to estimate variance of scores in Saddle_Prob
     p.single=rep(NA,ncol(G))
     for (p in 1:ncol(G)){
-      p.single[p]=Saddle_Prob(q=as.vector(qtilde)[p], mu = mu, g = G_tilde[,p])$p.value
+      p.single[p]=SPAtest::Saddle_Prob(q=as.vector(qtilde)[p], mu = mu, g = G_tilde[,p])$p.value
     }
   }
 #   print("GLMM")
@@ -1229,11 +1303,11 @@ GeneScan3D.UKB.GLMM<-function(G=G_gene_buffer,G.EnhancerAll=G_EnhancerAll,R=leng
       if(outcome=='D'){
         #Observed test statistic
         qtilde.Enhancer =as.vector(S.Enhancer)/sqrt(ratio) +as.vector(t(G_tilde.Enhancer)%*%mu)
-        #The term as.vector(t(G_tilde.Enhancer)%*%mu) would be removed in SPAtest:::Saddle_Prob
+        #The term as.vector(t(G_tilde.Enhancer)%*%mu) would be removed in SPAtest::Saddle_Prob
         #keep the ratio to estimate variance of scores in Saddle_Prob
         p.single.Enhancer=rep(NA,ncol(G_tilde.Enhancer))
         for (p in 1:ncol(G_tilde.Enhancer)){
-          p.single.Enhancer[p]=Saddle_Prob(q=as.vector(qtilde.Enhancer)[p], mu = mu, g = G_tilde.Enhancer[,p])$p.value
+          p.single.Enhancer[p]=SPAtest::Saddle_Prob(q=as.vector(qtilde.Enhancer)[p], mu = mu, g = G_tilde.Enhancer[,p])$p.value
         }
       }
 
@@ -1453,38 +1527,6 @@ Get.cauchy<-function(p){
     return(1-pcauchy(cct.stat))
   }
 }
-Impute<-function(Z, impute.method){
-  p<-dim(Z)[2]
-  if(impute.method =="random"){
-    for(i in 1:p){
-      IDX<-which(is.na(Z[,i]))
-      if(length(IDX) > 0){
-        maf1<-mean(Z[-IDX,i])/2
-        Z[IDX,i]<-rbinom(length(IDX),2,maf1)
-      }
-    }
-  } else if(impute.method =="fixed"){
-    for(i in 1:p){
-      IDX<-which(is.na(Z[,i]))
-      if(length(IDX) > 0){
-        maf1<-mean(Z[-IDX,i])/2
-        Z[IDX,i]<-2 * maf1
-      }
-    }
-  } else if(impute.method =="bestguess") {
-    for(i in 1:p){
-      IDX<-which(is.na(Z[,i]))
-      if(length(IDX) > 0){
-        maf1<-mean(Z[-IDX,i])/2
-        Z[IDX,i]<-round(2 * maf1)
-      }
-    }
-  } else {
-    stop("Error: Imputation method shoud be \"fixed\", \"random\" or \"bestguess\" ")
-  }
-  return(as.matrix(Z))
-}
-
 Genotype_filter=function(G,pos,impute.method='fixed'){
 
   if(ncol(G)==0|ncol(G)==1){
@@ -1492,9 +1534,12 @@ Genotype_filter=function(G,pos,impute.method='fixed'){
   }
 
   #missing genotype imputation
+  G <- Matrix::Matrix(G, sparse = TRUE)
   G[G==-9 | G==9]=NA
-  N_MISS=sum(is.na(G))
-  MISS.freq=apply(is.na(G),2,mean)
+  missing_mask <- is.na(G)
+  N_MISS=sum(missing_mask)
+  MISS.freq=.kp_col_means(missing_mask)
+  rm(missing_mask)
 
   if(N_MISS>0){
     msg<-sprintf("The missing genotype rate is %f. Imputation is applied.", N_MISS/nrow(G)/ncol(G))
@@ -1503,18 +1548,18 @@ Genotype_filter=function(G,pos,impute.method='fixed'){
   }
 
   #MAF filtering
-  MAF<-apply(G,2,mean)/2 #MAF of nonfiltered variants
+  MAF<-.kp_col_means(G)/2 #MAF of nonfiltered variants
   G[,MAF>0.5 & !is.na(MAF)]<-2-G[,MAF>0.5 & !is.na(MAF)]
-  MAF<-apply(G,2,mean)/2
-  s<-apply(G,2,sd)
-  SNP.index<-which(MAF>0 & s!=0 & !is.na(MAF))
+  MAF<-.kp_col_means(G)/2
+  variance <- .kp_col_means(G^2) - .kp_col_means(G)^2
+  SNP.index<-which(MAF>0 & variance>0 & !is.na(MAF))
 
-  check.index<-which(MAF>0 & s!=0 & !is.na(MAF)  & MISS.freq<0.1)
+  check.index<-which(MAF>0 & variance>0 & !is.na(MAF)  & MISS.freq<0.1)
   if(length(check.index)<=1 ){
     stop('Number of variants with missing rate <=10% in the gene plus buffer region is <=1')
   }
 
-  G<-Matrix(G[,SNP.index])
+  G<-Matrix::Matrix(G[,SNP.index,drop=FALSE])
   pos=pos[SNP.index]
   genotype_filter=list(G=G,pos=pos)
   return(genotype_filter)
@@ -1522,9 +1567,12 @@ Genotype_filter=function(G,pos,impute.method='fixed'){
 Genotype_filter_Enhancer=function(G.Enhancer,impute.method='fixed'){
 
   #missing genotype imputation
+  G.Enhancer <- Matrix::Matrix(G.Enhancer, sparse = TRUE)
   G.Enhancer[G.Enhancer==-9 | G.Enhancer==9]=NA
-  N_MISS.Enhancer=sum(is.na(G.Enhancer))
-  MISS.freq.Enhancer=apply(is.na(G.Enhancer),2,mean)
+  missing_mask <- is.na(G.Enhancer)
+  N_MISS.Enhancer=sum(missing_mask)
+  MISS.freq.Enhancer=.kp_col_means(missing_mask)
+  rm(missing_mask)
   if(N_MISS.Enhancer>0){
     msg<-sprintf("The missing genotype rate is %f. Imputation is applied.", N_MISS.Enhancer/nrow(G.Enhancer)/ncol(G.Enhancer))
     warning(msg,call.=F)
@@ -1532,25 +1580,16 @@ Genotype_filter_Enhancer=function(G.Enhancer,impute.method='fixed'){
   }
 
   #MAF filtering
-  MAF.Enhancer<-apply(G.Enhancer,2,mean)/2 #MAF of nonfiltered variants
+  MAF.Enhancer<-.kp_col_means(G.Enhancer)/2 #MAF of nonfiltered variants
   G.Enhancer[,MAF.Enhancer>0.5 & !is.na(MAF.Enhancer)]<-2-G.Enhancer[,MAF.Enhancer>0.5 & !is.na(MAF.Enhancer)]
-  MAF.Enhancer<-apply(G.Enhancer,2,mean)/2
-  s.Enhancer<-apply(G.Enhancer,2,sd)
-  SNP.index.Enhancer<-which(MAF.Enhancer>0 & s.Enhancer!=0 & !is.na(MAF.Enhancer))
+  MAF.Enhancer<-.kp_col_means(G.Enhancer)/2
+  variance.Enhancer <- .kp_col_means(G.Enhancer^2) -
+    .kp_col_means(G.Enhancer)^2
+  SNP.index.Enhancer<-which(MAF.Enhancer>0 & variance.Enhancer>0 & !is.na(MAF.Enhancer))
 
-  G.Enhancer<-Matrix(G.Enhancer[,SNP.index.Enhancer])
+  G.Enhancer<-Matrix::Matrix(G.Enhancer[,SNP.index.Enhancer,drop=FALSE])
   return(G.Enhancer)
 }
 
 #####knockoff AL functions
-#percentage notation
-percent <- function(x, digits = 3, format = "f", ...) {
-  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
-}
-sparse.cor <- function(x){
-  .kp_sparse_cov_cor(x, need_cov = TRUE, need_cor = TRUE)
-}
-sparse.cov.cross <- function(x,y){
-  list(cov = .kp_sparse_cross_cov(x, y))
-}
 max_nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
