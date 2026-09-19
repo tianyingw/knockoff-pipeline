@@ -17,6 +17,55 @@ test_that("sparse covariance helpers match dense reference formulas", {
 })
 
 
+test_that("imputation preserves an already complete sparse matrix", {
+  x <- Matrix::Matrix(
+    matrix(c(0, 1, 2, 0, 0, 1, 0, 2), nrow = 4L), sparse = TRUE
+  )
+  observed <- KnockoffPipeline:::Impute(x, "fixed")
+  expect_s4_class(observed, "Matrix")
+  expect_identical(observed, x)
+})
+
+
+test_that("sparse missing-value imputation matches column means", {
+  x <- Matrix::Matrix(
+    matrix(c(0, NA, 2, 0, 1, 2, NA, 1), nrow = 4L), sparse = TRUE
+  )
+  observed <- KnockoffPipeline:::Impute(x, "fixed")
+  expected <- matrix(c(0, 2 / 3, 2, 0, 1, 2, 4 / 3, 1), nrow = 4L)
+  expect_equal(observed, expected)
+})
+
+
+test_that("Single knockoff construction reuses precomputed correlations", {
+  set.seed(101)
+  x <- matrix(rbinom(120L * 4L, 2L, 0.25), nrow = 120L)
+  x <- Matrix::Matrix(x, sparse = TRUE)
+  pos <- c(100, 1000, 2500, 5000)
+  cor_x <- KnockoffPipeline:::.kp_sparse_cov_cor(
+    x, need_cov = FALSE, need_cor = TRUE
+  )$cor
+  clusters <- stats::cutree(
+    stats::hclust(stats::as.dist(1 - abs(cor_x)), method = "single"),
+    h = 0.25
+  )
+  expect_identical(unname(clusters), seq_len(ncol(x)))
+
+  set.seed(73)
+  expected <- KnockoffPipeline:::create.KS(
+    x, pos, M = 2L, n.AL = 60L, thres.ultrarare = 0,
+    method = "uniform", bigmemory = FALSE
+  )
+  set.seed(73)
+  observed <- KnockoffPipeline:::create.KS(
+    x, pos, M = 2L, n.AL = 60L, thres.ultrarare = 0,
+    method = "uniform", bigmemory = FALSE,
+    cor.X.precomputed = cor_x, preclustered = TRUE
+  )
+  expect_equal(observed, expected, tolerance = 0)
+})
+
+
 test_that("continuous score helper preserves the original formula", {
   set.seed(29)
   n <- 80L

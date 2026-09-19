@@ -182,8 +182,12 @@ utils::globalVariables(c(
     showProgress = FALSE
   )
   bim <- as.data.frame(bim, stringsAsFactors = FALSE)
-  if (nrow(bim) == 0L) return(bim)
+  if (nrow(bim) == 0L) {
+    attr(bim, "kp_pos_sorted") <- TRUE
+    return(bim)
+  }
   if (anyNA(bim$pos)) stop("Non-numeric positions found in exported .bim metadata.")
+  attr(bim, "kp_pos_sorted") <- !is.unsorted(bim$pos, strictly = FALSE)
   bim
 }
 
@@ -233,6 +237,28 @@ utils::globalVariables(c(
   out
 }
 
+.subset_bim_range <- function(bim_metadata, start, stop) {
+  if (is.null(bim_metadata)) return(data.frame())
+  if (nrow(bim_metadata) == 0L)
+    return(bim_metadata[0, , drop = FALSE])
+  pos <- as.numeric(bim_metadata$pos)
+  if (anyNA(pos)) stop("BIM metadata contain missing positions.")
+
+  # Metadata read by .read_plink_bim_chr() are checked once and marked, so the
+  # hot block/gene loop does not rescan a whole chromosome merely to establish
+  # that binary lookup is safe.  Unmarked external inputs retain a fail-safe
+  # sortedness check and correct unsorted fallback.
+  sorted <- attr(bim_metadata, "kp_pos_sorted", exact = TRUE)
+  if (is.null(sorted)) sorted <- !is.unsorted(pos, strictly = FALSE)
+  if (!isTRUE(sorted)) {
+    return(bim_metadata[pos >= start & pos <= stop, , drop = FALSE])
+  }
+  first <- findInterval(start, pos, left.open = TRUE) + 1L
+  last <- findInterval(stop, pos)
+  if (first > last) return(bim_metadata[0, , drop = FALSE])
+  bim_metadata[seq.int(first, last), , drop = FALSE]
+}
+
 .prepare_raw_genotypes <- function(raw, target_ids, bim_metadata) {
   raw <- as.data.frame(raw, check.names = FALSE, stringsAsFactors = FALSE)
   if (ncol(raw) <= 6L)
@@ -245,19 +271,28 @@ utils::globalVariables(c(
   if (iid_col > 6L)
     stop("PLINK .raw IID column was not found among the six sample columns.")
 
-  raw_ids <- .as_sample_id(raw[[iid_col]], "PLINK .raw IIDs")
   if (is.null(target_ids)) {
+    raw_ids <- .as_sample_id(raw[[iid_col]], "PLINK .raw IIDs")
     target_ids <- raw_ids
+    row_index <- seq_along(raw_ids)
   } else {
     target_ids <- .as_sample_id(target_ids, "target sample IDs")
-  }
-  row_index <- match(target_ids, raw_ids)
-  if (anyNA(row_index)) {
-    missing_ids <- target_ids[is.na(row_index)]
-    stop(
-      length(missing_ids), " target sample(s) are absent from the PLINK .raw export. Examples: ",
-      paste(utils::head(missing_ids, 5L), collapse = ", ")
-    )
+    raw_ids <- trimws(as.character(raw[[iid_col]]))
+    if (identical(raw_ids, target_ids)) {
+      # target_ids have just been validated as nonmissing and unique, so an
+      # identical PLINK vector needs neither a second duplicate scan nor match.
+      row_index <- seq_along(raw_ids)
+    } else {
+      raw_ids <- .as_sample_id(raw_ids, "PLINK .raw IIDs")
+      row_index <- match(target_ids, raw_ids)
+      if (anyNA(row_index)) {
+        missing_ids <- target_ids[is.na(row_index)]
+        stop(
+          length(missing_ids), " target sample(s) are absent from the PLINK .raw export. Examples: ",
+          paste(utils::head(missing_ids, 5L), collapse = ", ")
+        )
+      }
+    }
   }
 
   genotype_names <- names(raw)[-(1:6)]
@@ -293,9 +328,10 @@ utils::globalVariables(c(
     )
   }
 
-  # as.matrix() preserves an all-integer export; mixed integer/double input is
-  # promoted only when required by R's matrix representation.
-  geno <- as.matrix(genotype_columns)
+  # cbind preserves an all-integer export; mixed integer/double input is
+  # promoted only when required by R's matrix representation, without the
+  # extra data-frame coercion pass performed by as.matrix().
+  geno <- do.call(cbind, unname(genotype_columns))
   rownames(geno) <- target_ids
   colnames(geno) <- genotype_names
 

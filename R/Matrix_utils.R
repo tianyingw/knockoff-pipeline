@@ -22,26 +22,53 @@
   if (inherits(x, "Matrix")) Matrix::colSums(x) else base::colSums(x)
 }
 
-.kp_weighted_col_sums_sq <- function(x, weights) {
-  if (length(weights) != nrow(x))
-    stop("The weight vector must contain one value per matrix row.")
-  .kp_col_sums(x * (weights * x))
-}
-
 .kp_continuous_score_p <- function(x, result.prelim) {
-  residual <- as.numeric(result.prelim$Y - result.prelim$nullglm$fitted.values)
-  v <- rep(as.numeric(stats::var(residual)), nrow(x))
+  residual <- as.numeric(result.prelim$res)
+  if (length(residual) != nrow(x))
+    residual <- as.numeric(result.prelim$Y - result.prelim$nullglm$fitted.values)
+  v0 <- as.numeric(result.prelim$v[1L])
+  if (length(v0) != 1L || !is.finite(v0))
+    v0 <- as.numeric(stats::var(residual))
   score <- as.numeric(.kp_crossprod(x, residual))
-  raw_variance <- .kp_weighted_col_sums_sq(x, v)
-  predictor_cross <- as.matrix(
-    .kp_crossprod(x, v * result.prelim$X0)
-  )
+  raw_variance <- v0 * .kp_col_sums(x * x)
+  predictor_cross <- v0 * as.matrix(.kp_crossprod(x, result.prelim$X0))
   projected <- rowSums(
     (predictor_cross %*% result.prelim$inv.X0) * predictor_cross
   )
   stats::pchisq(
     score^2 / (raw_variance - projected), df = 1, lower.tail = FALSE
   )
+}
+
+# Canonical genotype imputation used by all analysis modes.  The historical
+# method files each carried an identical copy; keeping one implementation
+# avoids load-order-dependent overrides.  Extract each affected column once,
+# rather than repeatedly slicing the full matrix inside the missing-value loop.
+Impute <- function(Z, impute.method) {
+  methods <- c("random", "fixed", "bestguess")
+  if (!is.character(impute.method) || length(impute.method) != 1L ||
+      is.na(impute.method) || !impute.method %in% methods) {
+    stop(
+      "Error: Imputation method should be \"fixed\", \"random\" or \"bestguess\" "
+    )
+  }
+  if (!anyNA(Z)) return(Z)
+  Z <- as.matrix(Z)
+
+  for (i in seq_len(ncol(Z))) {
+    values <- Z[, i]
+    missing <- which(is.na(values))
+    if (length(missing) == 0L) next
+    maf1 <- mean(values, na.rm = TRUE) / 2
+    values[missing] <- switch(
+      impute.method,
+      random = stats::rbinom(length(missing), 2, maf1),
+      fixed = 2 * maf1,
+      bestguess = round(2 * maf1)
+    )
+    Z[, i] <- values
+  }
+  Z
 }
 
 .kp_sparse_cov_cor <- function(x, need_cov = TRUE, need_cor = TRUE) {

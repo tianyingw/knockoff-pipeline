@@ -36,9 +36,7 @@ run_single_block <- function(
   # reports that situation as a failed/no-output export, but it is an empty
   # analysis unit rather than a pipeline error.  Detect it from the chromosome
   # BIM metadata before invoking PLINK so genuine export failures remain fatal.
-  block_bim <- bim_metadata[
-    bim_metadata$pos >= start & bim_metadata$pos <= stop, , drop = FALSE
-  ]
+  block_bim <- .subset_bim_range(bim_metadata, start, stop)
   if (nrow(block_bim) == 0L) return(NULL)
 
   tmpdir <- if (is.null(temp_dir)) tempdir() else temp_dir
@@ -180,20 +178,26 @@ Single_Window_Analysis <- function(
 
   G          <- preprocess$G
   pos        <- preprocess$pos
+  cor.X      <- preprocess$cor.X
   variant_metadata <- preprocess$variant_metadata
   window.bed <- preprocess$window.bed
-  current_context <- .make_knockoff_context(
-    test_type = "Single_Window", M = M, genome_build = genome_build,
-    variant_metadata = variant_metadata, reference_id = reference_id,
-    construction_id = paste0(
-      "KnockoffScreen-SCIP-v2;prefilter_minor_MAC;impute=", impute.method,
-      ";imputation_seed=", if (is.null(imputation_seed)) "NULL" else imputation_seed,
-      ";corr_max=0.75;maxBP=100000;thres_ultrarare=",
-      format(thres.ultrarare, scientific = FALSE, trim = TRUE),
-      ";R2=1;method=shrinkage"
-    ),
-    random_seed = knockoff_seed
-  )
+  .preprocessed <- NULL
+  geno <- NULL
+  current_context <- NULL
+  if (isTRUE(save_knockoff) || isTRUE(load_knockoff)) {
+    current_context <- .make_knockoff_context(
+      test_type = "Single_Window", M = M, genome_build = genome_build,
+      variant_metadata = variant_metadata, reference_id = reference_id,
+      construction_id = paste0(
+        "KnockoffScreen-SCIP-v2;prefilter_minor_MAC;impute=", impute.method,
+        ";imputation_seed=", if (is.null(imputation_seed)) "NULL" else imputation_seed,
+        ";corr_max=0.75;maxBP=100000;thres_ultrarare=",
+        format(thres.ultrarare, scientific = FALSE, trim = TRUE),
+        ";R2=1;method=shrinkage"
+      ),
+      random_seed = knockoff_seed
+    )
+  }
 
   # ---- Knockoff: load or generate -----------------------------------------
   G_k          <- NULL
@@ -271,7 +275,8 @@ Single_Window_Analysis <- function(
       function() create.KS(
         X = G, pos = pos, M = M, bigmemory = bigmemory,
         backing_path = backing_path, backing_prefix = backing_prefix,
-        thres.ultrarare = thres.ultrarare
+        thres.ultrarare = thres.ultrarare,
+        cor.X.precomputed = cor.X, preclustered = TRUE
       )
     )
 
@@ -306,6 +311,11 @@ Single_Window_Analysis <- function(
   # ---- Stage 1: return after saving knockoff (no association test) --------
   if (isTRUE(stage1_only)) return(invisible(NULL))
 
+  # The dense p-by-p correlation matrix is needed only during construction.
+  # Drop both references before association so the next natural GC can reclaim
+  # it without retaining the full preprocessing result list.
+  rm(preprocess, cor.X)
+
   # ---- Association test ---------------------------------------------------
   fit <- KS.chr(
     result.prelim = nullobj,
@@ -315,9 +325,9 @@ Single_Window_Analysis <- function(
     M             = M,
     thres.single  = thres.single,
     thres.ultrarare = thres.ultrarare,
-    Gsub.id       = Gsub.id
+    Gsub.id       = Gsub.id,
+    prevalidated  = TRUE
   )
-  rm(G_k, G, pos, window.bed); gc()
   return(fit)
 }
 
@@ -431,6 +441,7 @@ Preprocess <- function(geno, chr, window = NULL, thres.maf = 0,
   if (!identical(cluster.idx, seq_len(ncol(G)))) {
     G   <- G[, cluster.idx, drop = FALSE]
     MAF <- MAF[cluster.idx]; MAC <- MAC[cluster.idx]; pos <- pos[cluster.idx]
+    cor.X <- cor.X[cluster.idx, cluster.idx, drop = FALSE]
     variant_metadata <- variant_metadata[cluster.idx, , drop = FALSE]
   }
 
@@ -438,6 +449,7 @@ Preprocess <- function(geno, chr, window = NULL, thres.maf = 0,
   if (!identical(unique.idx, seq_len(ncol(G)))) {
     G   <- G[, unique.idx, drop = FALSE]
     MAF <- MAF[unique.idx]; MAC <- MAC[unique.idx]; pos <- pos[unique.idx]
+    cor.X <- cor.X[unique.idx, unique.idx, drop = FALSE]
     variant_metadata <- variant_metadata[unique.idx, , drop = FALSE]
   }
 
@@ -452,9 +464,9 @@ Preprocess <- function(geno, chr, window = NULL, thres.maf = 0,
     }
     window.bed <- window.bed[order(as.numeric(window.bed[, 2])), ]
     return(list(G = G, chr = chr, pos = pos, window.bed = window.bed,
-                variant_metadata = variant_metadata))
+                variant_metadata = variant_metadata, cor.X = cor.X))
   } else {
     return(list(G = G, chr = chr, pos = pos, window.bed = NULL,
-                variant_metadata = variant_metadata))
+                variant_metadata = variant_metadata, cor.X = cor.X))
   }
 }

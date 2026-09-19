@@ -116,6 +116,34 @@ test_that("non-numeric PLINK genotype columns fail explicitly", {
 })
 
 
+test_that("BIM ranges use sorted lookup with an unsorted fallback", {
+  bim <- data.frame(
+    chr = 1L, variant_id = letters[1:5], pos = c(10, 20, 30, 40, 50),
+    a1 = "A", a2 = "G"
+  )
+  expected <- bim[2:4, , drop = FALSE]
+
+  expect_identical(
+    KnockoffPipeline:::.subset_bim_range(bim, 20, 40), expected
+  )
+  expect_equal(
+    KnockoffPipeline:::.subset_bim_range(bim[c(5, 2, 4, 1, 3), ], 20, 40),
+    expected[c(1, 3, 2), , drop = FALSE],
+    ignore_attr = TRUE
+  )
+  expect_equal(
+    nrow(KnockoffPipeline:::.subset_bim_range(bim, 21, 29)), 0L
+  )
+
+  fractional <- bim
+  fractional$pos <- c(10.5, 20.25, 20.25, 30.75, 40.5)
+  expect_identical(
+    KnockoffPipeline:::.subset_bim_range(fractional, 20.25, 30.75),
+    fractional[2:4, , drop = FALSE]
+  )
+})
+
+
 test_that("all stages use phenotype and covariate complete cases in .fam order", {
   input_dir <- tempfile("analysis-samples-")
   dir.create(input_dir)

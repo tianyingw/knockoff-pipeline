@@ -31,27 +31,19 @@
 }
 
 
-KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,region.pos=NULL,tested.pos=NULL,excluded.pos=NULL,M=5,thres.single=0.01,thres.ultrarare=25,thres.missing=0.10,midout.dir=NULL,temp.dir=NULL,jobtitle=NULL,Gsub.id=NULL,impute.method='fixed',bigmemory=T,leveraging=T,LD.filter=NULL){
-  time.start<-proc.time()[3]
+KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,region.pos=NULL,tested.pos=NULL,excluded.pos=NULL,M=5,thres.single=0.01,thres.ultrarare=25,thres.missing=0.10,midout.dir=NULL,temp.dir=NULL,jobtitle=NULL,Gsub.id=NULL,impute.method='fixed',bigmemory=T,leveraging=T,LD.filter=NULL,prevalidated=FALSE){
   #region.step=0.1*10^5
-  options(scipen = 999) #remove scientific notations
   chr<-window.bed[1,1]
-  pos.min<-min(window.bed[,2:3])
-  pos.max<-max(window.bed[,2:3])
-  max.size<-max(window.bed[,3]-window.bed[,2])
   if(length(region.pos)==0){
     region.pos=c(min(window.bed[,2:3]),max(window.bed[,2:3]))
   }
 
-  null.model<-F;
   result.summary.single<-c();result.summary.window<-c();variant.info<-c()
-  G.now<-c();G.before<-c();G.after<-c()
   start.index<-1
   while (start.index<length(region.pos)){
     start<-region.pos[start.index]
     end<-region.pos[start.index+1]-1
 
-    # print(paste0(percent((start-pos.min)/(pos.max-pos.min)),' finished. Time used: ', round(proc.time()[3]-time.start,digits=1),'s. Scan ',start,'-',end))
     start.index<-start.index+1
 
     # print('processing genotype data')
@@ -64,14 +56,22 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       warning(msg,call.=F)
       match.index <- match.index[!is.na(match.index)]
     }
-    G <- input.X[match.index,,drop=F]
+    if (identical(match.index, seq_len(nrow(input.X)))) {
+      G <- input.X
+    } else {
+      G <- input.X[match.index,,drop=FALSE]
+    }
     #sparse matrix operation
-    MAF<-colMeans(G)/2;MAC<-colSums(G)
+    MAF<-.kp_col_means(G)/2;MAC<-.kp_col_sums(G)
     flip_to_minor <- MAF > 0.5 & !is.na(MAF)
     MAC[flip_to_minor] <- nrow(G)*2-MAC[flip_to_minor]
     MAF[flip_to_minor] <- 1-MAF[flip_to_minor]
-    s<-colMeans(G^2)-colMeans(G)^2
-    SNP.index<-which(MAF>0 & MAC>=thres.ultrarare & s!=0 & !is.na(MAF))# & MAC>10
+    if (isTRUE(prevalidated)) {
+      SNP.index <- seq_len(ncol(G))
+    } else {
+      s <- .kp_col_means(G^2) - .kp_col_means(G)^2
+      SNP.index<-which(MAF>0 & MAC>=thres.ultrarare & s!=0 & !is.na(MAF))# & MAC>10
+    }
 
     #check.index<-which(MAF>0 & MAC>=thres.ultrarare & s!=0 & !is.na(MAF)  & MISS.freq<0.1)
     if(length(SNP.index)<=1 ){
@@ -79,7 +79,11 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       warning(msg,call.=F)
       next
     }
-    G<-G[,SNP.index,drop=F]#;beta<-beta[SNP.index,]
+    if (!identical(SNP.index, seq_len(ncol(G)))) {
+      G<-G[,SNP.index,drop=FALSE]#;beta<-beta[SNP.index,]
+    }
+    MAF <- MAF[SNP.index]
+    MAC <- MAC[SNP.index]
     # pos<-as.numeric(gsub("^X8\\.","",colnames(G)))
     pos <- as.numeric(colnames(G))
     if(length(beta)==0){beta<-rep(0,ncol(G))}
@@ -88,30 +92,26 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
     p.single <- .get_p_in_chunks(G, result.prelim)
 
     #output info for tested variants
-    temp.variant.info<-cbind(pos,p.single,MAF[SNP.index],MAC[SNP.index])
+    temp.variant.info<-cbind(pos,p.single,MAF,MAC)
     colnames(temp.variant.info)<-c('pos','pvalue','MAF','MAC')
 
     variant.info<-rbind(variant.info,temp.variant.info)
     
-    MAF<-colMeans(G)/2;MAC<-colSums(G)
-    flip_to_minor <- MAF > 0.5 & !is.na(MAF)
-    MAC[flip_to_minor] <- nrow(G)*2-MAC[flip_to_minor]
-    MAF[flip_to_minor] <- 1-MAF[flip_to_minor]
     # print(sum(MAF>0.01))
-    G<-Matrix(G,sparse=T)
+    if (!inherits(G, "Matrix")) G<-Matrix::Matrix(G,sparse=TRUE)
 
     #get positions
     # pos<-as.numeric(gsub("^X8\\.","",colnames(G)))
     pos <- as.numeric(colnames(G))
 
     # tic('generating knockoffs')
-    gc()
     #generate knockoffs
     if(is.null(input.G_k)){
+      gc()
       if(leveraging==T){
-        G_k<-create.MK(G,pos,M=M,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=0.1*10^6,thres.ultrarare=thres.ultrarare,bigmemory=bigmemory,R2.thres=0.75)
+        G_k<-create.KS(G,pos,M=M,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=0.1*10^6,thres.ultrarare=thres.ultrarare,bigmemory=bigmemory,R2.thres=0.75)
       }else{
-        G_k<-create.MK(G,pos,M=M,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=0.1*10^6,thres.ultrarare=thres.ultrarare,bigmemory=bigmemory,n.AL=nrow(G),R2.thres=0.75)
+        G_k<-create.KS(G,pos,M=M,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=0.1*10^6,thres.ultrarare=thres.ultrarare,bigmemory=bigmemory,n.AL=nrow(G),R2.thres=0.75)
       }
       G_k_column_index <- seq_len(ncol(G))
     }else{
@@ -168,7 +168,6 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
     # toc()
 
     # tic('rare variants')
-    a <- proc.time()
     ##rare variants
     rare.index<-which(MAF<thres.single & MAC>=thres.ultrarare)
     # print(length(rare.index))
@@ -180,9 +179,6 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       p.rare_k<-p.single_k[rare.index,,drop=F]
       beta.rare<-beta[rare.index]
       # print(length(beta))
-      b <- proc.time()
-      # print(b[3]-a[3])
-      a <- proc.time()
       #set beta weights and windows
       weight.beta<-dbeta(MAF,1,25)
       weight.matrix<-as.matrix(weight.beta)
@@ -202,10 +198,6 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       window.matrix0<-as.matrix(window.matrix0[,window.index])
       window.matrix<-Matrix(window.matrix0)
       window.summary<-cbind(window.temp[window.index,2],window.temp[window.index,3],t(apply(window.matrix,2,function(x)c(min(pos[which(x==1)]),max(pos[which(x==1)])))))
-      b <- proc.time()
-      # print(b[3]-a[3])
-
-      a <- proc.time()
       p.KS<-c();p.KS_k<-c();p.individual<-c()
       for(i in 1:ceiling(ncol(window.matrix)/100)){
         temp.window.matrix<-window.matrix[,(1+(i-1)*100):min(ncol(window.matrix),i*100),drop=F]
@@ -225,12 +217,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
         p.KS<-rbind(p.KS,KS.fit$p.KS)
         p.KS_k<-rbind(p.KS_k,KS.fit$p.KS_k)
         p.individual<-rbind(p.individual,KS.fit$p.individual)
-        gc()
       }
-      b <- proc.time()
-      # print(b[3]-a[3])
-
-      a <- proc.time()
       #######
       p.A<-p.KS;p.A_k<-p.KS_k
       #Knockoff statistics
@@ -252,8 +239,6 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       }
 
       result.summary.window<-rbind(result.summary.window,temp.summary.window)
-      b <- proc.time()
-      # print(b[3]-a[3])
     #   toc()
     }
 
@@ -263,13 +248,19 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
   return(list(result.single=result.summary.single,result.window=result.summary.window,variant.info=variant.info))
 }
 
-create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=100000,n.AL=floor(10*nrow(X)^(1/3)*log(nrow(X))),thres.ultrarare=25,R2.thres=1,method='shrinkage',bigmemory=T,backing_path=NULL,backing_prefix=NULL) {
+create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=100000,n.AL=floor(10*nrow(X)^(1/3)*log(nrow(X))),thres.ultrarare=25,R2.thres=1,method='shrinkage',bigmemory=T,backing_path=NULL,backing_prefix=NULL,cor.X.precomputed=NULL,preclustered=FALSE) {
 
   if(class(X)[1]!='dgCMatrix'){X<-Matrix(X,sparse=T)} #convert it to sparse matrix format
 
-  cor.X <- .kp_sparse_cov_cor(
-    X, need_cov = FALSE, need_cor = TRUE
-  )$cor
+  if (is.null(cor.X.precomputed)) {
+    cor.X <- .kp_sparse_cov_cor(
+      X, need_cov = FALSE, need_cor = TRUE
+    )$cor
+  } else {
+    cor.X <- as.matrix(cor.X.precomputed)
+    if (!identical(dim(cor.X), c(ncol(X), ncol(X))) || any(!is.finite(cor.X)))
+      stop("The precomputed correlation matrix does not match X.")
+  }
 
   #svd to get leverage score, can be optimized;update: tried fast leveraging, but the R matrix is singular possibly because X is sparse.
   if(method=='svd.irlba'){
@@ -305,10 +296,11 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
   )$cov
   skip.index <- which(colSums(X.AL != 0) <= thres.ultrarare)
 
-  Sigma.distance = as.dist(1 - abs(cor.X))
-  if(ncol(X)>1){
+  if (isTRUE(preclustered)) {
+    clusters <- seq_len(ncol(X))
+  } else if(ncol(X)>1){
+    Sigma.distance = as.dist(1 - abs(cor.X))
     fit = hclust(Sigma.distance, method="single")
-    corr_max = corr_max
     clusters = cutree(fit, h=1-corr_max)
   }else{clusters<-1}
 
@@ -359,8 +351,6 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
         if(i %in% skip.index){fitted.values<-0}
         if(!(i %in% skip.index |length(index)==0)){
 
-          a<-proc.time()
-
           x.AL<-X.AL[,index,drop=F];
           n.exist<-length(intersect(index,index.exist))
           x.exist.AL<-matrix(0,nrow=nrow(X.AL),ncol=n.exist*M)
@@ -371,11 +361,6 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
             }
           }
           y.AL<-w*X[index.AL,i];#x.exist.AL<-w*x.exist[index.AL,,drop=F];x.AL<-w*x[index.AL,,drop=F] #create re-scaled data
-
-          b<-proc.time()
-          #print(b[3]-a[3])
-
-          a<-proc.time()
 
           temp.xy<-rbind(mean(y.AL),crossprod(x.AL,y.AL)/length(y.AL)-colMeans(x.AL)*mean(y.AL))
           temp.xy<-rbind(temp.xy,crossprod(x.exist.AL,y.AL)/length(y.AL)-colMeans(x.exist.AL)*mean(y.AL))
@@ -397,11 +382,6 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
           svd.index<-intersect(1:n.svd,which(svd.fit$d!=0))
           temp.inv<-v[,svd.index,drop=F]%*%(svd.fit$d[svd.index]^(-1)*t(v[,svd.index,drop=F]))
           temp.beta<-temp.inv%*%temp.xy
-          b<-proc.time()
-          #print(b[3]-a[3])
-
-          a<-proc.time()
-
           x<-X[,index,drop=F]
           temp.j<-1
           fitted.values<-temp.beta[1]+x%*%temp.beta[(temp.j+1):(temp.j+ncol(x)),,drop=F]-sum(colMeans(x)*temp.beta[(temp.j+1):(temp.j+ncol(x)),,drop=F])
@@ -416,9 +396,6 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
               temp.j<-temp.j+ncol(temp.x)
             }
           }
-
-          b<-proc.time()
-          #print(b[3]-a[3])
 
         }
         residuals<-as.numeric(y-fitted.values)
@@ -439,15 +416,11 @@ create.KS<- function(X,pos,M=5,corr_max=0.75,maxN.neighbor=Inf,maxBP.neighbor=10
       index.exist<-c(index.exist,i)
     }
     #sample mutiple knockoffs
-    a<-proc.time()
-
     cluster.sample.index<-sapply(1:M,function(x)sample(1:nrow(X)))
     for(j in 1:M){
       X_k[[j]][,which(clusters==k)]<-round(cluster.fitted+cluster.residuals[cluster.sample.index[,j],,drop=F],digits=1)
       #X_k[j,,which(clusters==k)]<-cluster.fitted+cluster.residuals[cluster.sample.index[,j],,drop=F]
     }
-    b<-proc.time()
-    #print(b[3]-a[3])
   }
   return(X_k)
 }
@@ -501,7 +474,6 @@ KS.test<-function(temp.G,temp.G_k,p.rare,p.rare_k,result.prelim,window.matrix,we
   p.dispersion<-matrix(NA,ncol(window.matrix),ncol(weight.matrix))
   p.dispersion_k<-array(NA,dim=c(length(temp.G_k),ncol(window.matrix),ncol(weight.matrix)))
   
-  #proc.time()
   if(outcome=='D'){v<-mu*(1-mu)}else{v<-rep(as.numeric(var(Y.res)),nrow(temp.G))}
   A<-crossprod(temp.G,v*temp.G)#t(temp.G)%*%(v*temp.G)
   B<-crossprod(temp.G,v*X0)#t(temp.G)%*%(v*X0)
@@ -529,8 +501,6 @@ KS.test<-function(temp.G,temp.G_k,p.rare,p.rare_k,result.prelim,window.matrix,we
       numeric(ncol(window.matrix))
     ))
   }
-  #proc.time()
-
   p.V1<-Get.cauchy.scan(p.rare,window.matrix)
   p.V1_k<-apply(p.rare_k,2,Get.cauchy.scan,window.matrix=window.matrix)
   if(ncol(window.matrix)==1){p.V1_k<-matrix(p.V1_k,1,length(temp.G_k))}
@@ -547,7 +517,6 @@ KS.test<-function(temp.G,temp.G_k,p.rare,p.rare_k,result.prelim,window.matrix,we
 
   return(list(p.KS=p.KS,p.KS_k=p.KS_k,p.individual=p.individual))
 }
-
 Get_Liu_PVal.MOD.Lambda<-function(Q.all, lambda, log.p=FALSE){
   param<-Get_Liu_Params_Mod_Lambda(lambda)
   Q.Norm<-(Q.all - param$muQ)/param$sigmaQ
@@ -630,37 +599,6 @@ Get.p.SKAT.KS<-function(score,K,window.matrix,weight,result.prelim){
 
 
 
-#percentage notation
-percent <- function(x, digits = 3, format = "f", ...) {
-  paste0(formatC(100 * x, format = format, digits = digits, ...), "%")
-}
-
-sparse.cor <- function(x){
-  .kp_sparse_cov_cor(x, need_cov = TRUE, need_cor = TRUE)
-}
-
-# sparse.cor <- function(x){
-#   n <- nrow(x)
-#   cMeans <- Matrix::colMeans(x)
-#   covmat <- (Matrix::crossprod(x) - n * tcrossprod(cMeans)) / (n - 1)
-#   sdvec  <- sqrt(diag(covmat))
-#   cormat <- covmat / tcrossprod(sdvec)
-#   list(cov = covmat, cor = cormat)
-# }
-
-
-# sparse.cov.cross <- function(x,y){
-#   n <- nrow(x)
-#   cMeans.x <- colMeans(x);cMeans.y <- colMeans(y)
-#   covmat <- (Matrix::crossprod(x,y) - n*tcrossprod(cMeans.x,cMeans.y))/(n-1)
-#   list(cov=covmat)
-# }
-
-sparse.cov.cross <- function(x,y){
-  list(cov = .kp_sparse_cross_cov(x, y))
-}
-
-
 max_nth<-function(x,n){return(sort(x,partial=length(x)-(n-1))[length(x)-(n-1)])}
 
 Get.p.base<-function(X,result.prelim){
@@ -684,12 +622,13 @@ Get.p.base<-function(X,result.prelim){
 
 Get.p<-function(X,result.prelim){
   #X<-as.matrix(X)
-  mu<-result.prelim$nullglm$fitted.values;Y.res<-result.prelim$Y-mu
   outcome<-result.prelim$out_type
   if(outcome=='D'){
     invisible(capture.output(
-      p <- ScoreTest_SPA(t(X), result.prelim$Y, result.prelim$X0,
-                         method = c("fastSPA"), minmac = -Inf)$p.value
+      p <- WGScan::ScoreTest_SPA(
+        t(X), result.prelim$Y, result.prelim$X0,
+        method = c("fastSPA"), minmac = -Inf
+      )$p.value
     ))
   }else{
     p <- .kp_continuous_score_p(X, result.prelim)
@@ -820,37 +759,4 @@ Get.p.moment<-function(Q,re.Q){ #Q a A*q matrix of test statistics, re.Q a B*q m
   re.p<-t(pchisq((t(Q)-re.mean)*sqrt(2*re.df)/sqrt(re.variance)+re.df,re.df,lower.tail=F))
   #re.p[re.p==1]<-0.99
   return(re.p)
-}
-
-
-Impute<-function(Z, impute.method){
-  p<-dim(Z)[2]
-  if(impute.method =="random"){
-    for(i in 1:p){
-      IDX<-which(is.na(Z[,i]))
-      if(length(IDX) > 0){
-        maf1<-mean(Z[-IDX,i])/2
-        Z[IDX,i]<-rbinom(length(IDX),2,maf1)
-      }
-    }
-  } else if(impute.method =="fixed"){
-    for(i in 1:p){
-      IDX<-which(is.na(Z[,i]))
-      if(length(IDX) > 0){
-        maf1<-mean(Z[-IDX,i])/2
-        Z[IDX,i]<-2 * maf1
-      }
-    }
-  } else if(impute.method =="bestguess") {
-    for(i in 1:p){
-      IDX<-which(is.na(Z[,i]))
-      if(length(IDX) > 0){
-        maf1<-mean(Z[-IDX,i])/2
-        Z[IDX,i]<-round(2 * maf1)
-      }
-    }
-  } else {
-    stop("Error: Imputation method shoud be \"fixed\", \"random\" or \"bestguess\" ")
-  }
-  return(as.matrix(Z))
 }

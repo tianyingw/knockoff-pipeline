@@ -60,7 +60,7 @@ Fit_null_model<-function(Y, X=NULL, id=NULL, out_type="C", resampling=FALSE,B=10
    #prepare invserse matrix for covariates
    if(out_type=='D'){v<-mu*(1-mu)}else{v<-rep(as.numeric(var(Y.res)),length(Y))}
    inv.X0<-solve(t(X0)%*%(v*X0))
-   inv.vX0<-solve(t(X0)%*%(v*X0))
+   inv.vX0<-inv.X0
    
    #prepare the preliminary features
    result.null.model<-list(Y=Y,id=id,n=n,mu=mu,res=Y.res,v=v,
