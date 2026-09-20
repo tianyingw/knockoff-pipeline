@@ -231,10 +231,9 @@ any saved matrix is accepted:
   position, both alleles, and the coded allele. Equal column counts are not
   sufficient: a change in variant identity, order, position, or allele is an
   incompatibility.
-- The analysis path, `M`, `genome_build`, construction settings, and the
-  reference-file identity are checked exactly. For `Single_Window`, the reference identity includes the LD-block
-  filename and content checksum; for `Gene_Centric`, it covers the gene
-  annotation resource.
+- The analysis path, `M`, `genome_build`, and construction settings are checked
+  exactly, together with the LD-block definition file for `Single_Window` or
+  the gene-annotation file for `Gene_Centric`.
 
 Missing/obsolete compatibility metadata or any variant, build, construction,
 `M`, or reference mismatch fails closed with an error. The pipeline does not silently

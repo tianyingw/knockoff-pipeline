@@ -199,10 +199,10 @@ and PLINK-ID matching rules as downstream analysis.
 Before reuse, the ordered variant fingerprint is compared exactly. It
 contains chromosome, BIM variant ID, BIM base position, both alleles, and the
 coded allele, so equal column counts alone are insufficient. The analysis
-path, \code{M}, \code{genome_build}, construction settings, and
-reference-file identity are also compared. For \code{"Single_Window"}, that identity includes the
-LD-block filename and content checksum; for \code{"Gene_Centric"}, it covers
-the gene-annotation resource. Missing or obsolete metadata and any variant,
+path, \code{M}, \code{genome_build}, and construction settings are also
+compared, together with the LD-block definition file for
+\code{"Single_Window"} or the gene-annotation file for
+\code{"Gene_Centric"}. Missing or obsolete metadata and any variant,
 build, construction, \code{M}, or reference mismatch fail closed with an error rather than
 silently reusing or regenerating an incompatible knockoff.
 

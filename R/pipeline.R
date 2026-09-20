@@ -115,8 +115,9 @@
 #' Reuse requires the same character-IID set (row order may differ) and
 #' compares an ordered fingerprint containing BIM
 #' chromosome, variant ID, base position, both alleles, and the coded allele.
-#' The analysis path, \code{M}, genome build, construction settings, and
-#' reference-file identity/checksum are also compared. Missing or obsolete
+#' The analysis path, \code{M}, genome build, construction settings, and the
+#' identity of the LD-block definition file (Single_Window) or gene-annotation
+#' file (Gene_Centric) are also compared. Missing or obsolete
 #' metadata and any mismatch fail closed with an error.
 #'
 #' \strong{Analysis checkpoints.}
@@ -760,7 +761,7 @@ run_pipeline <- function(
   fam <- paste0(geno_file, ".fam")
   list(
     # The BED may be hundreds of gigabytes, so use path/size/mtime rather than
-    # forcing a full-file checksum on every restart.
+    # hashing the entire file on every restart.
     bed = .file_stat_identity(bed),
     bim = .reference_file_id(bim),
     fam = .reference_file_id(fam)
