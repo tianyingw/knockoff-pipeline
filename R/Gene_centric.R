@@ -5,8 +5,85 @@
 #
 # knockoff_dir is the chr-level subdirectory (e.g. <knockoff_root>/chr1/).
 # One RDS file per gene is written there for the gene_buffer knockoff only.
-# Enhancer knockoffs are always generated fresh (fast + many; not saved).
+# Enhancer knockoffs are generated during downstream analysis and are not saved.
 # ----------------------------------------------------------------------------
+.gene_region_spec <- function(use_glmm) {
+  if (!is.logical(use_glmm) || length(use_glmm) != 1L || is.na(use_glmm))
+    stop("'use_glmm' must be TRUE or FALSE.")
+
+  if (isTRUE(use_glmm)) {
+    return(list(
+      gene_buffer_bp = 5000L,
+      gene_neighbor_bp = 100000L,
+      gene_source_flank_bp = 105000L,
+      enhancer_source_flank_bp = 50000L
+    ))
+  }
+
+  list(
+    gene_buffer_bp = 5000L,
+    gene_neighbor_bp = 10000L,
+    # Retain the established GeneScan3DKnock gene input.  Although its local
+    # regression search is 10 kb, the full input participates in clustering
+    # and leverage calculations, so shrinking 55 kb to 15 kb is not neutral.
+    gene_source_flank_bp = 55000L,
+    enhancer_source_flank_bp = 10000L
+  )
+}
+
+
+.gene_enhancers <- function(gene_id, abc_df, gh_df) {
+  key <- as.character(gene_id)
+  abc <- data.table::data.table(start = numeric(), end = numeric())
+  gh <- data.table::data.table(start = numeric(), end = numeric())
+
+  if (!is.null(abc_df)) {
+    required <- c("TargetGene", "start", "end")
+    missing <- setdiff(required, names(abc_df))
+    if (length(missing) > 0L)
+      stop("ABC enhancer table is missing: ", paste(missing, collapse = ", "))
+    take <- which(as.character(abc_df[["TargetGene"]]) == key)
+    if (length(take) > 0L) {
+      abc <- data.table::data.table(
+        start = suppressWarnings(as.numeric(abc_df[["start"]][take])),
+        end = suppressWarnings(as.numeric(abc_df[["end"]][take]))
+      )
+    }
+  }
+  if (!is.null(gh_df)) {
+    required <- c("gene", "GH_start", "GH_end")
+    missing <- setdiff(required, names(gh_df))
+    if (length(missing) > 0L)
+      stop("GeneHancer table is missing: ", paste(missing, collapse = ", "))
+    take <- which(as.character(gh_df[["gene"]]) == key)
+    if (length(take) > 0L) {
+      gh <- data.table::data.table(
+        start = suppressWarnings(as.numeric(gh_df[["GH_start"]][take])),
+        end = suppressWarnings(as.numeric(gh_df[["GH_end"]][take]))
+      )
+    }
+  }
+
+  out <- data.table::rbindlist(list(abc, gh), use.names = TRUE)
+  valid <- is.finite(out$start) & is.finite(out$end) & out$end >= out$start
+  if (any(!valid))
+    stop("Enhancer table contains invalid coordinates for gene ", key, ".")
+  unique(out)
+}
+
+
+.eligible_gene_enhancers <- function(enhancers, bim_metadata,
+                                     min_target_variants = 6L) {
+  if (nrow(enhancers) == 0L) return(enhancers)
+  counts <- vapply(seq_len(nrow(enhancers)), function(i) {
+    nrow(.subset_bim_range(
+      bim_metadata, enhancers$start[i], enhancers$end[i]
+    ))
+  }, integer(1))
+  enhancers[counts >= min_target_variants]
+}
+
+
 run_batch_gene <- function(
   genes,
   b,
@@ -46,9 +123,10 @@ run_batch_gene <- function(
     stop("Unable to create temporary directory: ", tmpdir)
   chr    <- as.numeric(gsub("chr", "", genes[kk_vec[1], chr]))
 
-  gene_buffer_extension <- 5000 + 50000
-  start_all    <- min(genes[kk_vec, start]) - gene_buffer_extension
-  end_all      <- max(genes[kk_vec, end])   + gene_buffer_extension
+  region_spec <- .gene_region_spec(use_glmm)
+  gene_buffer_extension <- region_spec$gene_source_flank_bp
+  start_all    <- max(1, min(genes[kk_vec, start]) - gene_buffer_extension)
+  end_all      <- max(genes[kk_vec, end]) + gene_buffer_extension
   batch_bim <- .subset_bim_range(bim_metadata, start_all, end_all)
   # A gene batch can legitimately have no variants in the input dataset.
   # Skip that empty analysis unit before PLINK turns it into a no-output error.
@@ -95,8 +173,121 @@ run_batch_gene <- function(
   colnames(G_batch) <- as.character(variants_batch)
   rm(raw); gc()
 
+  # Enhancers are independent genomic intervals and may be far outside the
+  # gene-batch envelope.  Build a per-gene map in stable ABC-then-GH order,
+  # then export the union of the required enhancer variants in one PLINK call.
+  # Stage 1 stops after gene-buffer knockoff generation and therefore performs
+  # no enhancer lookup or genotype I/O.
+  empty_enhancers <- data.table::data.table(start = numeric(), end = numeric())
+  enhancers_by_gene <- rep(list(empty_enhancers), length(kk_vec))
+  G_enhancer_batch <- NULL
+  variants_enhancer_batch <- numeric(0)
+
+  if (!isTRUE(stage1_only)) {
+    enhancers_by_gene <- lapply(kk_vec, function(kk) {
+      .eligible_gene_enhancers(
+        .gene_enhancers(genes[kk, id], abc_df, gh_df),
+        bim_metadata = bim_metadata,
+        min_target_variants = 6L
+      )
+    })
+
+    enhancer_intervals <- data.table::rbindlist(
+      lapply(enhancers_by_gene, function(enhancers) {
+        if (nrow(enhancers) == 0L) return(NULL)
+        data.table::data.table(
+          start = pmax(1, enhancers$start -
+            region_spec$enhancer_source_flank_bp),
+          end = enhancers$end + region_spec$enhancer_source_flank_bp
+        )
+      }),
+      use.names = TRUE
+    )
+    enhancer_bim <- .subset_bim_intervals(bim_metadata, enhancer_intervals)
+
+    if (nrow(enhancer_bim) > 0L) {
+      duplicate_ids <- .duplicated_bim_variant_ids(bim_metadata)
+      ambiguous_ids <- intersect(
+        as.character(enhancer_bim$variant_id), duplicate_ids
+      )
+      if (length(ambiguous_ids) > 0L)
+        stop(
+          "Enhancer export is ambiguous because selected PLINK variant IDs ",
+          "are duplicated on chromosome ", chr, ". Examples: ",
+          paste(utils::head(ambiguous_ids, 5L), collapse = ", ")
+        )
+
+      enhancer_extract_file <- tempfile(
+        sprintf("KnockoffPipeline_chr%d_batch_%d_%d_enhancer_ids_",
+                chr, min(kk_vec), max(kk_vec)),
+        tmpdir = tmpdir, fileext = ".txt"
+      )
+      enhancer_prefix <- tempfile(
+        sprintf("KnockoffPipeline_chr%d_batch_%d_%d_enhancers_",
+                chr, min(kk_vec), max(kk_vec)),
+        tmpdir = tmpdir
+      )
+      enhancer_files <- c(
+        enhancer_extract_file,
+        paste0(enhancer_prefix, c(".raw", ".log", ".nosex"))
+      )
+      on.exit(unlink(enhancer_files, force = TRUE), add = TRUE)
+      data.table::fwrite(
+        data.table::data.table(variant_id = enhancer_bim$variant_id),
+        enhancer_extract_file, sep = "\t", col.names = FALSE, quote = FALSE
+      )
+
+      enhancer_status <- .run_plink_additive_extract(
+        plink_prefix = plink_prefix, geno_file = geno.file, chr = chr,
+        extract_file = enhancer_extract_file, keep_arg = keep_arg,
+        out_prefix = enhancer_prefix, export_switch = export_switch,
+        plink_threads = plink_threads
+      )
+      if (!identical(enhancer_status, 0L))
+        stop("PLINK failed while exporting enhancer intervals for chr", chr,
+             " batch ", b, ".")
+
+      enhancer_raw_file <- paste0(enhancer_prefix, ".raw")
+      if (!file.exists(enhancer_raw_file))
+        stop("PLINK did not create the expected enhancer .raw export for chr",
+             chr, " batch ", b, ".")
+      enhancer_raw <- data.table::fread(
+        enhancer_raw_file, data.table = FALSE, check.names = FALSE,
+        keepLeadingZeros = TRUE
+      )
+      enhancer_prepared <- .prepare_raw_genotypes(
+        raw = enhancer_raw, target_ids = Gsub.id,
+        bim_metadata = enhancer_bim
+      )
+      expected_ids <- as.character(enhancer_bim$variant_id)
+      returned_ids <- as.character(
+        enhancer_prepared$variant_metadata$variant_id
+      )
+      if (length(returned_ids) != length(expected_ids) ||
+          !setequal(returned_ids, expected_ids))
+        stop(
+          "PLINK enhancer export did not return exactly the requested ",
+          "variant-ID set for chr", chr, " batch ", b, "."
+        )
+      variant_order <- match(expected_ids, returned_ids)
+      if (!identical(variant_order, seq_along(returned_ids))) {
+        enhancer_prepared$geno <-
+          enhancer_prepared$geno[, variant_order, drop = FALSE]
+        enhancer_prepared$variant_metadata <-
+          enhancer_prepared$variant_metadata[variant_order, , drop = FALSE]
+      }
+      G_enhancer_batch <- enhancer_prepared$geno
+      variants_enhancer_batch <-
+        as.numeric(enhancer_prepared$variant_metadata$pos)
+      colnames(G_enhancer_batch) <- as.character(variants_enhancer_batch)
+      rm(enhancer_raw, enhancer_prepared)
+      unlink(enhancer_files, force = TRUE)
+    }
+  }
+
   ## ===== Per-gene function =====
-  safe_fun <- function(kk) {
+  safe_fun <- function(kk_position) {
+    kk <- kk_vec[kk_position]
     tryCatch({
       gene_start <- genes[kk, start]
       gene_end   <- genes[kk, end]
@@ -117,7 +308,10 @@ run_batch_gene <- function(
       save_this_gene <- isTRUE(save_knockoff) && !load_this_gene
 
       # Gene buffer SNPs (±5kb around gene body)
-      idx_gene_buffer <- which(variants_batch >= gene_start-5000 & variants_batch <= gene_end+5000)
+      idx_gene_buffer <- which(
+        variants_batch >= gene_start - region_spec$gene_buffer_bp &
+          variants_batch <= gene_end + region_spec$gene_buffer_bp
+      )
       idx_gene_surround <- which(variants_batch >= gene_start-gene_buffer_extension & variants_batch <= gene_end+gene_buffer_extension)
       
       if (length(idx_gene_buffer) <= 1) return(NULL)
@@ -128,11 +322,9 @@ run_batch_gene <- function(
       gene_buffer.pos <- c(min(variants_batch[idx_gene_buffer]),
                            max(variants_batch[idx_gene_buffer]))
 
-      # Enhancer regions
-      abc_enhancers <- abc_df[TargetGene == gene_id, .(start, end)]
-      gh_enhancers  <- gh_df[gene == gene_id,
-                             .(start = GH_start, end = GH_end)]
-      enhancers     <- unique(rbind(abc_enhancers, gh_enhancers))
+      # Enhancer regions are sliced from their own disjoint PLINK export, not
+      # from the gene-centered batch matrix.
+      enhancers <- enhancers_by_gene[[kk_position]]
 
       G_EnhancerAll_surround        <- NULL
       variants_EnhancerAll_surround <- NULL
@@ -141,22 +333,34 @@ run_batch_gene <- function(
       p_EnhancerAll                 <- NULL
       R <- 0
 
-      if (nrow(enhancers) > 0) {
-        for (r in seq_len(nrow(enhancers))) {
-          e_start <- enhancers$start[r]; e_end <- enhancers$end[r]
-          idx_e_surrond <- which(variants_batch >= e_start-5000 & variants_batch <= e_end+5000)
-          idx_e <- which(variants_batch >= e_start & variants_batch <= e_end)
+      if (nrow(enhancers) > 0L && !is.null(G_enhancer_batch)) {
+        surround_index <- lapply(seq_len(nrow(enhancers)), function(r) {
+          which(
+            variants_enhancer_batch >= enhancers$start[r] -
+              region_spec$enhancer_source_flank_bp &
+              variants_enhancer_batch <= enhancers$end[r] +
+              region_spec$enhancer_source_flank_bp
+          )
+        })
+        target_count <- vapply(seq_len(nrow(enhancers)), function(r) {
+          sum(variants_enhancer_batch >= enhancers$start[r] &
+                variants_enhancer_batch <= enhancers$end[r])
+        }, integer(1))
+        keep_enhancer <- lengths(surround_index) > 0L & target_count > 5L
 
-          if (length(idx_e) > 5) {
-            G_EnhancerAll_surround        <- cbind(G_EnhancerAll_surround,
-                                                   G_batch[, idx_e_surrond, drop = FALSE])
-            Enhancer.pos                  <- rbind(Enhancer.pos, c(e_start, e_end))
-            variants_EnhancerAll_surround <- c(variants_EnhancerAll_surround,
-                                               variants_batch[idx_e_surrond])
-            p_EnhancerAll_surround        <- c(p_EnhancerAll_surround, length(idx_e_surrond))
-            p_EnhancerAll                 <- c(p_EnhancerAll, length(idx_e))
-            R <- R + 1
-          }
+        if (any(keep_enhancer)) {
+          enhancers <- enhancers[keep_enhancer]
+          surround_index <- surround_index[keep_enhancer]
+          target_count <- target_count[keep_enhancer]
+          flat_index <- unlist(surround_index, use.names = FALSE)
+          G_EnhancerAll_surround <-
+            G_enhancer_batch[, flat_index, drop = FALSE]
+          variants_EnhancerAll_surround <-
+            variants_enhancer_batch[flat_index]
+          p_EnhancerAll_surround <- lengths(surround_index)
+          p_EnhancerAll <- target_count
+          Enhancer.pos <- as.matrix(enhancers[, .(start, end)])
+          R <- nrow(enhancers)
         }
       }
 
@@ -239,14 +443,16 @@ run_batch_gene <- function(
     })
   }
 
-  out <- parallel::mclapply(kk_vec, safe_fun, mc.cores = user_cores)
+  out <- parallel::mclapply(
+    seq_along(kk_vec), safe_fun, mc.cores = user_cores
+  )
   failed <- vapply(out, inherits, logical(1), what = "try-error")
   if (any(failed)) {
     stop("Gene batch ", b, " failed: ",
          paste(as.character(out[failed]), collapse = "; "))
   }
   out <- Filter(Negate(is.null), out)
-  rm(G_batch); gc()
+  rm(G_batch, G_enhancer_batch); gc()
 
   if (length(out) == 0) return(NULL)
   # FIX (original bug): was rbindlist(as.data.table(result_list)) — wrong nesting

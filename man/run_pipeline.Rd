@@ -131,12 +131,16 @@ Default \code{TRUE}.}
 \item{pipeline_stage}{Character. Controls the run mode:
 \describe{
 \item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
-\item{\code{"stage1_knockoff"}}{Generate and save knockoffs only; no
-association testing. First applies the same phenotype/covariate complete-case
+\item{\code{"stage1_knockoff"}}{Generate and save reusable knockoffs; no
+association testing. In gene-centric mode, this stage saves the gene-buffer
+knockoffs; enhancer knockoffs are generated downstream. First applies the same
+phenotype/covariate complete-case
 and PLINK-ID matching rules as a full run, then writes a sample-list file for
 reproducibility. Implies \code{save_knockoff = TRUE}.}
-\item{\code{"stage2_analysis"}}{Load pre-generated knockoffs and run
-association testing only. Requires \code{knockoff_dir}. The saved and current
+\item{\code{"stage2_analysis"}}{Load pre-generated reusable knockoffs,
+complete the remaining mode-specific computation, and run association
+testing. In gene-centric mode, this includes generating enhancer knockoffs.
+Requires \code{knockoff_dir}. The saved and current
 character-IID sets must match exactly, although row order may differ;
 incompatible sample, variant, or run metadata produce an error.}
 }}
@@ -218,7 +222,9 @@ Run stage 1 with the phenotype(s) and covariates that define the analysis
 complete cases, then run stage 2 with the same resulting sample set. Stage 1
 uses these columns only to establish the sample set and does not fit a null
 model. Stage 2 reads the saved sample list, requires an exact character-IID
-set match, and reindexes rows if their order differs.
+set match, and reindexes rows if their order differs. In gene-centric mode,
+stage 1 saves the reusable gene-buffer knockoffs, while stage 2 constructs
+phenotype-specific enhancer knockoffs before association testing.
 
 \strong{Multiple phenotypes.}
 Supply a character vector. Samples with missing values in \emph{any}

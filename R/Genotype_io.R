@@ -151,6 +151,44 @@ utils::globalVariables(c(
   system(cmd, ignore.stdout = TRUE, ignore.stderr = TRUE)
 }
 
+
+# Export a disjoint set of variants in one PLINK call.  The extract file
+# contains one variant ID per line and is built from the chromosome BIM table,
+# so this works for remote enhancer intervals without reading the continuous
+# span between a gene and its enhancers.
+.run_plink_additive_extract <- function(
+  plink_prefix, geno_file, chr, extract_file, keep_arg, out_prefix,
+  export_switch = NULL, plink_threads = NULL
+) {
+  if (is.null(export_switch))
+    export_switch <- .plink_additive_export_switch(plink_prefix)
+  if (!is.character(export_switch) || length(export_switch) != 1L ||
+      is.na(export_switch) ||
+      !export_switch %in% c("--recode A", "--export A"))
+    stop("'export_switch' must be one of '--recode A' or '--export A'.")
+  if (!is.character(extract_file) || length(extract_file) != 1L ||
+      is.na(extract_file) || !file.exists(extract_file))
+    stop("'extract_file' must name an existing variant-ID file.")
+
+  threads_arg <- ""
+  if (!is.null(plink_threads)) {
+    if (!is.numeric(plink_threads) || length(plink_threads) != 1L ||
+        is.na(plink_threads) || !is.finite(plink_threads) ||
+        plink_threads < 1 || plink_threads > .Machine$integer.max ||
+        plink_threads != floor(plink_threads))
+      stop("'plink_threads' must be NULL or one positive integer.")
+    threads_arg <- paste("--threads", as.integer(plink_threads))
+  }
+
+  cmd <- sprintf(
+    "%s --bfile %s --chr %s --extract %s %s %s %s --out %s --silent",
+    shQuote(plink_prefix), shQuote(geno_file), as.integer(chr),
+    shQuote(extract_file), keep_arg, export_switch, threads_arg,
+    shQuote(out_prefix)
+  )
+  system(cmd, ignore.stdout = TRUE, ignore.stderr = TRUE)
+}
+
 .read_plink_bim_chr <- function(geno_file, chr, plink_prefix = "plink2") {
   source_bim <- paste0(geno_file, ".bim")
   if (!file.exists(source_bim)) stop("PLINK .bim not found: ", source_bim)
@@ -184,11 +222,23 @@ utils::globalVariables(c(
   bim <- as.data.frame(bim, stringsAsFactors = FALSE)
   if (nrow(bim) == 0L) {
     attr(bim, "kp_pos_sorted") <- TRUE
+    attr(bim, "kp_duplicate_variant_ids") <- character(0)
     return(bim)
   }
   if (anyNA(bim$pos)) stop("Non-numeric positions found in exported .bim metadata.")
   attr(bim, "kp_pos_sorted") <- !is.unsorted(bim$pos, strictly = FALSE)
+  variant_ids <- as.character(bim$variant_id)
+  attr(bim, "kp_duplicate_variant_ids") <- unique(
+    variant_ids[duplicated(variant_ids)]
+  )
   bim
+}
+
+.duplicated_bim_variant_ids <- function(bim_metadata) {
+  cached <- attr(bim_metadata, "kp_duplicate_variant_ids", exact = TRUE)
+  if (!is.null(cached)) return(as.character(cached))
+  ids <- as.character(bim_metadata$variant_id)
+  unique(ids[duplicated(ids)])
 }
 
 .match_raw_variants <- function(raw_names, bim_metadata) {
@@ -257,6 +307,79 @@ utils::globalVariables(c(
   last <- findInterval(stop, pos)
   if (first > last) return(bim_metadata[0, , drop = FALSE])
   bim_metadata[seq.int(first, last), , drop = FALSE]
+}
+
+
+.merge_genomic_intervals <- function(intervals) {
+  if (is.null(intervals) || nrow(intervals) == 0L)
+    return(data.frame(start = numeric(), end = numeric()))
+  intervals <- as.data.frame(intervals, stringsAsFactors = FALSE)
+  if (!all(c("start", "end") %in% names(intervals)))
+    stop("Genomic intervals must contain 'start' and 'end' columns.")
+
+  start <- suppressWarnings(as.numeric(intervals$start))
+  end <- suppressWarnings(as.numeric(intervals$end))
+  keep <- is.finite(start) & is.finite(end) & end >= start
+  if (!any(keep))
+    return(data.frame(start = numeric(), end = numeric()))
+  ranges <- data.frame(
+    start = pmax(1, start[keep]),
+    end = end[keep]
+  )
+  ranges <- ranges[order(ranges$start, ranges$end), , drop = FALSE]
+
+  merged_start <- ranges$start[1L]
+  merged_end <- ranges$end[1L]
+  if (nrow(ranges) > 1L) {
+    for (i in 2:nrow(ranges)) {
+      last <- length(merged_start)
+      if (ranges$start[i] <= merged_end[last]) {
+        merged_end[last] <- max(merged_end[last], ranges$end[i])
+      } else {
+        merged_start <- c(merged_start, ranges$start[i])
+        merged_end <- c(merged_end, ranges$end[i])
+      }
+    }
+  }
+  data.frame(start = merged_start, end = merged_end)
+}
+
+
+# Return the BIM rows in the union of possibly remote genomic intervals.
+# Overlapping intervals are merged first, and rows retain chromosome-BIM order
+# so PLINK exports and downstream knockoff fingerprints are batch invariant.
+.subset_bim_intervals <- function(bim_metadata, intervals) {
+  if (is.null(bim_metadata)) return(data.frame())
+  if (nrow(bim_metadata) == 0L)
+    return(bim_metadata[0, , drop = FALSE])
+
+  ranges <- .merge_genomic_intervals(intervals)
+  if (nrow(ranges) == 0L)
+    return(bim_metadata[0, , drop = FALSE])
+
+  pos <- as.numeric(bim_metadata$pos)
+  if (anyNA(pos)) stop("BIM metadata contain missing positions.")
+  sorted <- attr(bim_metadata, "kp_pos_sorted", exact = TRUE)
+  if (is.null(sorted)) sorted <- !is.unsorted(pos, strictly = FALSE)
+
+  if (!isTRUE(sorted)) {
+    keep <- rep(FALSE, length(pos))
+    for (i in seq_len(nrow(ranges))) {
+      keep <- keep | (pos >= ranges$start[i] & pos <= ranges$end[i])
+    }
+    return(bim_metadata[keep, , drop = FALSE])
+  }
+
+  pieces <- vector("list", nrow(ranges))
+  for (i in seq_len(nrow(ranges))) {
+    first <- findInterval(ranges$start[i], pos, left.open = TRUE) + 1L
+    last <- findInterval(ranges$end[i], pos)
+    pieces[[i]] <- if (first <= last) seq.int(first, last) else integer(0)
+  }
+  index <- unlist(pieces, use.names = FALSE)
+  out <- bim_metadata[index, , drop = FALSE]
+  attr(out, "kp_pos_sorted") <- TRUE
+  out
 }
 
 .prepare_raw_genotypes <- function(raw, target_ids, bim_metadata) {

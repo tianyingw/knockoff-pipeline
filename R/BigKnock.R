@@ -510,7 +510,7 @@ GeneScan3D.UKB.GLMM.KnockoffGeneration <- function(
       # must fingerprint every predictor, not only the returned buffer columns.
       variant_metadata = variant_metadata_filter,
       reference_id = reference_id,
-      construction_id = "BIGKnock-gene-buffer-v4;corrected_skip_index;impute=fixed;batch_flank=50000;gene_buffer=5000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
+      construction_id = "BIGKnock-gene-buffer-v5;corrected_skip_index;impute=fixed;gene_target_flank=5000;neighbor_bp=100000;source_flank=105000;MAC_min=25;LD_filter=0.75;corr_base=0.05;thres_ultrarare=25;retain_if_target_reps_le_1",
       random_seed = knockoff_seed
     )
   } else {

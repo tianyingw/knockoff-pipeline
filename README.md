@@ -252,13 +252,13 @@ files and fails closed if the saved set is incomplete or incompatible.
 
 ### Two-Stage Workflow (`pipeline_stage`)
 
-The pipeline can be split into two independent stages, useful when knockoff generation and association testing need to run in separate jobs (e.g., on a cluster). Stage 1 requires the phenotype and covariate specification so that it generates knockoffs for the exact downstream complete-case sample set.
+The pipeline can be split into two jobs so reusable knockoff construction and downstream analysis can be scheduled separately (e.g., on a cluster). Stage 1 requires the phenotype and covariate specification so that it generates knockoffs for the exact downstream complete-case sample set. In gene-centric mode, Stage 1 saves gene-buffer knockoffs; enhancer knockoffs remain part of Stage 2.
 
 | `pipeline_stage`       | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
 | `"full"` (default)     | Complete end-to-end pipeline                                                 |
-| `"stage1_knockoff"`    | Form the complete-case sample set, generate knockoffs, and write its sample list; no null-model fitting or association testing |
-| `"stage2_analysis"`    | Load saved knockoffs; fit null models; run association tests; never delete the supplied knockoff directory |
+| `"stage1_knockoff"`    | Form the complete-case sample set, generate reusable knockoffs, and write its sample list; no null-model fitting or association testing |
+| `"stage2_analysis"`    | Load saved knockoffs, complete mode-specific computation (including gene-centric enhancer knockoffs), fit null models, and run association tests; never delete the supplied knockoff directory |
 
 **Stage 1:**
 

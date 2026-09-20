@@ -247,6 +247,41 @@ test_that("additive export accepts cached dialect and an explicit thread count",
 })
 
 
+test_that("disjoint additive export passes the variant-ID file to PLINK", {
+  skip_on_os("windows")
+  tmpdir <- tempfile("fake-plink-extract-")
+  dir.create(tmpdir)
+  on.exit(unlink(tmpdir, recursive = TRUE, force = TRUE), add = TRUE)
+  fake_plink <- file.path(tmpdir, "fake plink")
+  args_file <- file.path(tmpdir, "args.txt")
+  extract_file <- file.path(tmpdir, "enhancer variants.txt")
+  writeLines(c("rs1", "rs3"), extract_file)
+  writeLines(
+    c("#!/bin/sh", sprintf("printf '%%s\\n' \"$@\" > %s", shQuote(args_file))),
+    fake_plink
+  )
+  Sys.chmod(fake_plink, mode = "0755")
+
+  status <- KnockoffPipeline:::.run_plink_additive_extract(
+    plink_prefix = fake_plink,
+    geno_file = file.path(tmpdir, "input prefix"),
+    chr = 19L,
+    extract_file = extract_file,
+    keep_arg = "",
+    out_prefix = file.path(tmpdir, "output prefix"),
+    export_switch = "--export A",
+    plink_threads = 2L
+  )
+  args <- readLines(args_file)
+
+  expect_identical(status, 0L)
+  expect_identical(args[match("--chr", args) + 1L], "19")
+  expect_identical(args[match("--extract", args) + 1L], extract_file)
+  expect_identical(args[match("--threads", args) + 1L], "2")
+  expect_identical(args[match("--export", args) + 1L], "A")
+})
+
+
 test_that("saved knockoff rows allow reordering but reject a different set", {
   saved_ids <- c("001", "A-2", "B03")
   target_ids <- c("B03", "001", "A-2")

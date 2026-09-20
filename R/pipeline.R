@@ -71,13 +71,17 @@
 #' @param pipeline_stage Character. Controls the run mode:
 #'   \describe{
 #'     \item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
-#'     \item{\code{"stage1_knockoff"}}{Generate and save knockoffs only; no
-#'       association testing. First applies the same phenotype/covariate
+#'     \item{\code{"stage1_knockoff"}}{Generate and save reusable knockoffs;
+#'       no association testing. In gene-centric mode, this stage saves the
+#'       gene-buffer knockoffs; enhancer knockoffs are generated downstream.
+#'       First applies the same phenotype/covariate
 #'       complete-case and PLINK-ID matching rules as a full run, then writes
 #'       a sample-list file for reproducibility. Implies
 #'       \code{save_knockoff = TRUE}.}
-#'     \item{\code{"stage2_analysis"}}{Load pre-generated knockoffs and run
-#'       association testing only. Requires \code{knockoff_dir}.
+#'     \item{\code{"stage2_analysis"}}{Load pre-generated reusable knockoffs,
+#'       complete the remaining mode-specific computation, and run association
+#'       testing. In gene-centric mode, this includes generating enhancer
+#'       knockoffs. Requires \code{knockoff_dir}.
 #'       The saved and current character-IID sets must match exactly (row order
 #'       may differ); incompatible sample, variant, or run metadata error.}
 #'   }
@@ -132,7 +136,9 @@
 #' complete cases, then run stage 2 with the same resulting sample set. Stage 1
 #' uses these columns only to establish the sample set and does not fit a null
 #' model. Stage 2 reads the saved sample list, requires an exact character-IID
-#' set match, and reindexes rows if their order differs.
+#' set match, and reindexes rows if their order differs. In gene-centric mode,
+#' stage 1 saves the reusable gene-buffer knockoffs, while stage 2 constructs
+#' phenotype-specific enhancer knockoffs before association testing.
 #'
 #' \strong{Multiple phenotypes.}
 #' Supply a character vector. Samples with missing values in \emph{any}
@@ -809,7 +815,7 @@ run_pipeline <- function(
   geno_missing_imputation, sample_uncorrelated, relatedness_cutoff,
   n_markers_grm, fdr, sources
 ) {
-  list(
+  context <- list(
     # Version 2 invalidates checkpoints written before the corrected Single
     # MAC alignment and gene knockoff skip-index logic.
     schema_version = 2L,
@@ -831,6 +837,23 @@ run_pipeline <- function(
     fdr = as.double(fdr),
     sources = sources
   )
+
+  # Keep Single_Window checkpoint compatibility unchanged.  Gene-centric
+  # intermediates created before enhancer genotypes were loaded independently
+  # of the gene batch are not safe to mix with results from the current path.
+  if (identical(as.character(test_type), "Gene_Centric")) {
+    region_spec <- .gene_region_spec(use_glmm = !isTRUE(sample_uncorrelated))
+    context$gene_region_loading <- list(
+      version = 2L,
+      gene_buffer_bp = region_spec$gene_buffer_bp,
+      gene_neighbor_bp = region_spec$gene_neighbor_bp,
+      gene_source_flank_bp = region_spec$gene_source_flank_bp,
+      enhancer_source_flank_bp = region_spec$enhancer_source_flank_bp,
+      separate_exports = TRUE
+    )
+  }
+
+  context
 }
 
 
@@ -988,9 +1011,6 @@ run_pipeline <- function(
       .prepare_knockoff_directory(chr_ko_dir, create = TRUE)
 
       chr_genes <- .ordered_chr_genes(genes_info, c)
-      enhancer_files <- .enhancer_reference_paths(genome_build, c)
-      abc_df    <- data.table::fread(enhancer_files$abc)
-      gh_df     <- data.table::fread(enhancer_files$gh)
 
       batch_index <- split(seq_len(nrow(chr_genes)), ceiling(seq_len(nrow(chr_genes)) / batch_size))
       for (b in seq_along(batch_index)) {
@@ -1014,8 +1034,10 @@ run_pipeline <- function(
           temp_dir            = temp_dir,
           seed                = seed,
           use_glmm            = !sample_uncorrelated,
-          abc_df              = abc_df,
-          gh_df               = gh_df,
+          # Stage 1 persists only gene-buffer knockoffs.  Enhancer references
+          # and genotypes are deliberately left for downstream analysis.
+          abc_df              = NULL,
+          gh_df               = NULL,
           sparseSigma         = NULL,
           ratio               = NULL,
           user_cores          = user_cores,

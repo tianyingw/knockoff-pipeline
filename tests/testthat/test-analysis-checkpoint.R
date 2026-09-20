@@ -17,7 +17,7 @@ test_that("analysis checkpoint is created and an identical run can resume", {
 
 
 test_that("generated analysis contexts use the current algorithm schema", {
-  context <- KnockoffPipeline:::.make_analysis_checkpoint_context(
+  context_args <- list(
     test_type = "Single_Window", phenotype = "Y", sample_ids = "sample-1",
     pheno_id = "IID", covar_cols = character(),
     cat_covar_cols = character(), out_type = "C", M = 5L, seed = 17L,
@@ -26,8 +26,62 @@ test_that("generated analysis contexts use the current algorithm schema", {
     relatedness_cutoff = 0.125, n_markers_grm = 1000L, fdr = 0.1,
     sources = list()
   )
+  context <- do.call(
+    KnockoffPipeline:::.make_analysis_checkpoint_context, context_args
+  )
 
   expect_identical(context$schema_version, 2L)
+  expect_false("gene_region_loading" %in% names(context))
+
+  gene_glm <- do.call(
+    KnockoffPipeline:::.make_analysis_checkpoint_context,
+    utils::modifyList(context_args, list(test_type = "Gene_Centric"))
+  )
+  expect_identical(
+    gene_glm$gene_region_loading,
+    list(
+      version = 2L,
+      gene_buffer_bp = 5000L,
+      gene_neighbor_bp = 10000L,
+      gene_source_flank_bp = 55000L,
+      enhancer_source_flank_bp = 10000L,
+      separate_exports = TRUE
+    )
+  )
+
+  gene_glmm <- do.call(
+    KnockoffPipeline:::.make_analysis_checkpoint_context,
+    utils::modifyList(context_args, list(
+      test_type = "Gene_Centric", sample_uncorrelated = FALSE
+    ))
+  )
+  expect_identical(
+    gene_glmm$gene_region_loading,
+    list(
+      version = 2L,
+      gene_buffer_bp = 5000L,
+      gene_neighbor_bp = 100000L,
+      gene_source_flank_bp = 105000L,
+      enhancer_source_flank_bp = 50000L,
+      separate_exports = TRUE
+    )
+  )
+
+  old_gene_mid <- tempfile("old-gene-region-loading-")
+  dir.create(old_gene_mid)
+  on.exit(unlink(old_gene_mid, recursive = TRUE, force = TRUE), add = TRUE)
+  old_gene_context <- gene_glm
+  old_gene_context$gene_region_loading <- NULL
+  saveRDS(
+    old_gene_context,
+    file.path(old_gene_mid, "checkpoint_context.rds")
+  )
+  expect_error(
+    KnockoffPipeline:::.prepare_analysis_checkpoint(
+      old_gene_mid, gene_glm, read_mid_exist = TRUE
+    ),
+    "mismatch: gene_region_loading"
+  )
 })
 
 
