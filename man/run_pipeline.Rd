@@ -52,8 +52,7 @@ and downstream analysis use the same complete-case sample set.}
 When multiple phenotypes are provided, samples with missing values in
 \emph{any} phenotype or covariate are removed once before any analysis.
 Reusable knockoffs are generated and persisted internally on the first pass:
-SNP/window and gene-buffer knockoffs are reused, whereas gene-centric
-enhancer knockoffs are regenerated for each phenotype.}
+SNP/window, gene-buffer, and enhancer knockoffs are reused.}
 
 \item{pheno_id}{Character or \code{NULL}. Column name of the sample ID
 in the phenotype file. \code{NULL} assumes rows are already aligned with
@@ -132,15 +131,13 @@ Default \code{TRUE}.}
 \describe{
 \item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
 \item{\code{"stage1_knockoff"}}{Generate and save reusable knockoffs; no
-association testing. In gene-centric mode, this stage saves the gene-buffer
-knockoffs; enhancer knockoffs are generated downstream. First applies the same
+association testing. In gene-centric mode, each per-gene file contains both
+gene-buffer and enhancer knockoffs. First applies the same
 phenotype/covariate complete-case
 and PLINK-ID matching rules as a full run, then writes a sample-list file for
 reproducibility. Implies \code{save_knockoff = TRUE}.}
-\item{\code{"stage2_analysis"}}{Load pre-generated reusable knockoffs,
-complete the remaining mode-specific computation, and run association
-testing. In gene-centric mode, this includes generating enhancer knockoffs.
-Requires \code{knockoff_dir}. The saved and current
+\item{\code{"stage2_analysis"}}{Load pre-generated reusable knockoffs and run
+association testing. Requires \code{knockoff_dir}. The saved and current
 character-IID sets must match exactly, although row order may differ;
 incompatible sample, variant, or run metadata produce an error.}
 }}
@@ -205,7 +202,7 @@ contains chromosome, BIM variant ID, BIM base position, both alleles, and the
 coded allele, so equal column counts alone are insufficient. The analysis
 path, \code{M}, \code{genome_build}, and construction settings are also
 compared, together with the LD-block definition file for
-\code{"Single_Window"} or the gene-annotation file for
+\code{"Single_Window"} or the gene-annotation and enhancer-map files for
 \code{"Gene_Centric"}. Missing or obsolete metadata and any variant,
 build, construction, \code{M}, or reference mismatch fail closed with an error rather than
 silently reusing or regenerating an incompatible knockoff.
@@ -223,14 +220,13 @@ complete cases, then run stage 2 with the same resulting sample set. Stage 1
 uses these columns only to establish the sample set and does not fit a null
 model. Stage 2 reads the saved sample list, requires an exact character-IID
 set match, and reindexes rows if their order differs. In gene-centric mode,
-stage 1 saves the reusable gene-buffer knockoffs, while stage 2 constructs
-phenotype-specific enhancer knockoffs before association testing.
+stage 1 saves both gene-buffer and enhancer knockoffs in one per-gene RDS,
+and stage 2 loads them before association testing.
 
 \strong{Multiple phenotypes.}
 Supply a character vector. Samples with missing values in \emph{any}
-phenotype or covariate are removed once. SNP/window and gene-buffer knockoffs
-are reused, whereas gene-centric enhancer knockoffs are regenerated for each
-phenotype. Per-phenotype output goes to
+phenotype or covariate are removed once. SNP/window, gene-buffer, and enhancer
+knockoffs are reused. Per-phenotype output goes to
 \code{<outdir>/<phenotype_name>/}.
 }
 \examples{

@@ -9,7 +9,7 @@ The pipeline supports:
 - SNP-level and sliding-window inference (**Single_Window**)
 - Gene-centric inference with 3D enhancer information (**Gene_Centric**)
 - Standard-GLM and relatedness-aware GLMM analysis paths
-- Multiple phenotypes in a single run (reuse of SNP/window or gene-buffer knockoffs; gene-centric enhancer knockoffs are regenerated)
+- Multiple phenotypes in a single run (reuse of SNP/window, gene-buffer, and enhancer knockoffs)
 - **Knockoff persistence**: save generated knockoffs and reload them across sessions
 - **Two-stage workflow**: decouple knockoff generation from association testing
 
@@ -186,7 +186,7 @@ The `run_pipeline()` snippets in this section are schematic usage patterns, not 
 Pass a character vector to `phenotype`. The pipeline:
 
 1. Removes samples missing in **any** phenotype or covariate once, producing a single consistent sample set.
-2. Generates knockoffs on the first phenotype pass and persists reusable objects internally. SNP/window knockoffs and gene-buffer knockoffs are reused; gene-centric enhancer knockoffs are regenerated for each phenotype.
+2. Generates knockoffs on the first phenotype pass and persists reusable objects internally. SNP/window, gene-buffer, and enhancer knockoffs are reused.
 3. Writes per-phenotype results to `<outdir>/<phenotype_name>/`.
 
 ```R
@@ -233,7 +233,7 @@ any saved matrix is accepted:
   incompatibility.
 - The analysis path, `M`, `genome_build`, and construction settings are checked
   exactly, together with the LD-block definition file for `Single_Window` or
-  the gene-annotation file for `Gene_Centric`.
+  the gene-annotation and enhancer-map files for `Gene_Centric`.
 
 Missing/obsolete compatibility metadata or any variant, build, construction,
 `M`, or reference mismatch fails closed with an error. The pipeline does not silently
@@ -252,13 +252,13 @@ files and fails closed if the saved set is incomplete or incompatible.
 
 ### Two-Stage Workflow (`pipeline_stage`)
 
-The pipeline can be split into two jobs so reusable knockoff construction and downstream analysis can be scheduled separately (e.g., on a cluster). Stage 1 requires the phenotype and covariate specification so that it generates knockoffs for the exact downstream complete-case sample set. In gene-centric mode, Stage 1 saves gene-buffer knockoffs; enhancer knockoffs remain part of Stage 2.
+The pipeline can be split into two jobs so reusable knockoff construction and downstream analysis can be scheduled separately (e.g., on a cluster). Stage 1 requires the phenotype and covariate specification so that it generates knockoffs for the exact downstream complete-case sample set. In gene-centric mode, each per-gene RDS stores both gene-buffer and enhancer knockoffs.
 
 | `pipeline_stage`       | What it does                                                                 |
 |------------------------|------------------------------------------------------------------------------|
 | `"full"` (default)     | Complete end-to-end pipeline                                                 |
 | `"stage1_knockoff"`    | Form the complete-case sample set, generate reusable knockoffs, and write its sample list; no null-model fitting or association testing |
-| `"stage2_analysis"`    | Load saved knockoffs, complete mode-specific computation (including gene-centric enhancer knockoffs), fit null models, and run association tests; never delete the supplied knockoff directory |
+| `"stage2_analysis"`    | Load saved knockoffs, fit null models, and run association tests; never delete the supplied knockoff directory |
 
 **Stage 1:**
 
@@ -366,7 +366,7 @@ Use `<analysis_outdir>` below for the directory that receives one analysis resul
 | `<knockoff_dir>/chr<c>/block_XXXX_knockoff.rds` | Per-LD-block manifest (Single_Window)       |
 | `<knockoff_dir>/chr<c>/block_XXXX_knockoff_matrix-<generation>_<m>.desc` | Generation-unique `big.matrix` descriptor for copy `<m>`; use the manifest's `descriptor_files` names |
 | `<knockoff_dir>/chr<c>/block_XXXX_knockoff_matrix-<generation>_<m>.bin` | File-backed matrix paired with the descriptor; required with its manifest |
-| `<knockoff_dir>/chr<c>/gene_<ID>_ko.rds`       | Per-gene knockoff, gene buffer only (Gene_Centric) |
+| `<knockoff_dir>/chr<c>/gene_<ID>_ko.rds`       | Per-gene gene-buffer and enhancer knockoffs (Gene_Centric) |
 
 ### Multi-phenotype runs
 

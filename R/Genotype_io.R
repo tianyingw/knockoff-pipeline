@@ -467,7 +467,12 @@ utils::globalVariables(c(
   missing <- setdiff(required, names(metadata))
   if (length(missing) > 0L)
     stop("Variant metadata are missing: ", paste(missing, collapse = ", "))
-  apply(metadata[, required, drop = FALSE], 1L, paste, collapse = "\t")
+  # Row names reflect the temporary batch slice, not variant identity.  Drop
+  # them so an identical ordered variant set remains reusable when batch_size
+  # changes or completed genes are removed during restart.
+  unname(apply(
+    metadata[, required, drop = FALSE], 1L, paste, collapse = "\t"
+  ))
 }
 
 .make_knockoff_context <- function(test_type, M, genome_build,
@@ -499,7 +504,13 @@ utils::globalVariables(c(
               "construction_id", "random_seed",
               "variant_fingerprint")
   mismatched <- fields[!vapply(fields, function(field) {
-    identical(saved_context[[field]], current_context[[field]])
+    saved <- saved_context[[field]]
+    current <- current_context[[field]]
+    if (identical(field, "variant_fingerprint")) {
+      saved <- unname(saved)
+      current <- unname(current)
+    }
+    identical(saved, current)
   }, logical(1))]
   if (length(mismatched) > 0L) {
     stop(

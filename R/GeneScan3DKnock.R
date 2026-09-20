@@ -919,8 +919,8 @@ Get.cauchy<-function(p){
 #  * Gene_buffer knockoff: save/load with row & column validation.
 #    Input to create.MK.AL_gene_buffer is G_gene_buffer_surround
 #    (post-QC surround matrix — wider than gene buffer alone).
-#  * Enhancer knockoffs: always generated fresh, NOT saved.
-#  * stage1_only=TRUE: save gene_buffer knockoff then return NULL.
+#  * Gene-buffer and enhancer knockoffs share one per-gene bundle.
+#  * stage1_only=TRUE: save the complete bundle, then return NULL.
 #  * NULL null model supported when stage1_only=TRUE.
 # =============================================================================
 
@@ -945,8 +945,10 @@ GeneScan3D.KnockoffGeneration <- function(
   result.null.model             = NULL,
   M                             = 5,
   variant_metadata_gene_buffer_surround = NULL,
+  variant_metadata_EnhancerAll_surround = NULL,
   genome_build                  = NULL,
   reference_id                  = NULL,
+  enhancer_reference_id         = NULL,
   knockoff_seed                 = NULL,
   save_knockoff                 = FALSE,
   load_knockoff                 = FALSE,
@@ -959,6 +961,33 @@ GeneScan3D.KnockoffGeneration <- function(
   if (is.null(variant_metadata_gene_buffer_surround) ||
       nrow(variant_metadata_gene_buffer_surround) != ncol(G_gene_buffer_surround)) {
     stop("Variant metadata from the matching PLINK .bim rows must be supplied for every gene-surround column.")
+  }
+
+  if (!is.numeric(R) || length(R) != 1L || is.na(R) || !is.finite(R) ||
+      R < 0 || R != as.integer(R))
+    stop("R must be one non-negative integer.")
+  R_input <- as.integer(R)
+  if (R_input > 0L) {
+    if (is.null(G_EnhancerAll_surround) ||
+        is.null(variants_EnhancerAll_surround) ||
+        is.null(p_EnhancerAll_surround) ||
+        length(p_EnhancerAll_surround) != R_input ||
+        any(!is.finite(p_EnhancerAll_surround)) ||
+        any(p_EnhancerAll_surround < 1L) ||
+        any(p_EnhancerAll_surround != as.integer(p_EnhancerAll_surround)) ||
+        sum(p_EnhancerAll_surround) != ncol(G_EnhancerAll_surround) ||
+        length(variants_EnhancerAll_surround) != ncol(G_EnhancerAll_surround) ||
+        is.null(Enhancer.pos) || nrow(Enhancer.pos) != R_input) {
+      stop("Enhancer matrices, positions, region sizes, and coordinates are inconsistent.")
+    }
+    if (is.null(variant_metadata_EnhancerAll_surround) ||
+        nrow(variant_metadata_EnhancerAll_surround) !=
+          ncol(G_EnhancerAll_surround)) {
+      stop(paste0(
+        "Variant metadata from the matching PLINK .bim rows must be ",
+        "supplied for every enhancer-surround column."
+      ))
+    }
   }
 
   # ---- Sample matching (supports NULL null model for stage1) ---------------
@@ -1045,7 +1074,10 @@ GeneScan3D.KnockoffGeneration <- function(
             call. = FALSE)
     return(NULL)
   }
-  current_context <- if (isTRUE(save_knockoff) || isTRUE(load_knockoff)) {
+  persistent_knockoff <- isTRUE(save_knockoff) || isTRUE(load_knockoff)
+  current_enhancer_reference_id <-
+    .normalize_knockoff_reference_id(enhancer_reference_id)
+  current_context <- if (persistent_knockoff) {
     .make_knockoff_context(
       test_type = "Gene_Centric_GLM",
       M = M,
@@ -1061,13 +1093,31 @@ GeneScan3D.KnockoffGeneration <- function(
     list(M = as.integer(M))
   }
 
+  # A persistent GeneScan3DKnock file is a complete per-gene bundle.  Read it
+  # once here so the gene and enhancer loaders validate the same object.
+  knockoff_object <- NULL
+  enhancer_row_map <- seq_along(matched_ids)
+  if (isTRUE(load_knockoff)) {
+    loaded_bundle <- .load_gene_knockoff_bundle(
+      knockoff_file = knockoff_file,
+      matched_ids = matched_ids,
+      enhancer_reference_id = enhancer_reference_id,
+      n_enhancers = R_input,
+      method_label = "GeneScan3DKnock"
+    )
+    knockoff_object <- loaded_bundle$object
+    enhancer_row_map <- loaded_bundle$row_map
+  }
+
   # ---- Gene buffer knockoff: save / load / generate -----------------------
   # create.MK.AL_gene_buffer takes the POST-QC surround matrix as input.
   # It returns array [M × n_matched × p_in_gene_buffer].
   G_gene_buffer_knockoff <- .gene_ko_load_or_gen(
     load_knockoff  = load_knockoff,
-    save_knockoff  = save_knockoff,
+    # This caller writes the complete gene/enhancer bundle once, below.
+    save_knockoff  = FALSE,
     knockoff_file  = knockoff_file,
+    knockoff_object = knockoff_object,
     matched_ids    = matched_ids,
     p_expected     = length(positions_gene_buffer),
     gen_fun        = function() .with_local_seed(
@@ -1131,32 +1181,43 @@ GeneScan3D.KnockoffGeneration <- function(
     )
   }
 
-  # ---- Stage 1: done after saving knockoff --------------------------------
-  if (isTRUE(stage1_only)) return(invisible(NULL))
-
-  # ---- R enhancers (always generated fresh — not saved) -------------------
+  # ---- R enhancers ---------------------------------------------------------
+  # Enhancers are persisted with the gene-buffer knockoff. Stage 2 therefore
+  # validates and loads the same arrays instead of generating them again.
   G_EnhancerAll          <- NULL
   p_EnhancerAll_out      <- integer(0)
   Z_EnhancerAll_out      <- NULL
   G_EnhancerAll_knockoff <- NULL
-  R_input                <- R
   R                      <- 0L
+  enhancer_payloads <- if (isTRUE(save_knockoff) &&
+                            !isTRUE(load_knockoff)) {
+    out <- vector("list", R_input)
+    names(out) <- if (R_input > 0L)
+      sprintf("enhancer_%04d", seq_len(R_input)) else character(0)
+    out
+  } else {
+    NULL
+  }
 
-  if (R_input != 0) {
+  if (R_input > 0L) {
+    enhancer_ends <- cumsum(p_EnhancerAll_surround)
+    enhancer_starts <- c(1L, utils::head(enhancer_ends, -1L) + 1L)
     for (r in seq_len(R_input)) {
-      if (r == 1) {
-        G_Enh_surround   <- G_EnhancerAll_surround[,
-          seq_len(cumsum(p_EnhancerAll_surround)[r]), drop = FALSE]
-        pos_Enh_surround <- variants_EnhancerAll_surround[
-          seq_len(cumsum(p_EnhancerAll_surround)[r])]
-      } else {
-        G_Enh_surround   <- G_EnhancerAll_surround[,
-          (cumsum(p_EnhancerAll_surround)[r - 1] + 1):
-           cumsum(p_EnhancerAll_surround)[r], drop = FALSE]
-        pos_Enh_surround <- variants_EnhancerAll_surround[
-          (cumsum(p_EnhancerAll_surround)[r - 1] + 1):
-           cumsum(p_EnhancerAll_surround)[r]]
-      }
+      enhancer_index <- seq.int(enhancer_starts[r], enhancer_ends[r])
+      enhancer_name <- sprintf("enhancer_%04d", r)
+      enhancer_coords <- c(
+        start = as.numeric(Enhancer.pos[r, 1]),
+        end = as.numeric(Enhancer.pos[r, 2])
+      )
+      G_Enh_surround <- G_EnhancerAll_surround[,
+        enhancer_index, drop = FALSE]
+      pos_Enh_surround <- variants_EnhancerAll_surround[enhancer_index]
+      metadata_Enh_surround <- as.data.frame(
+        variant_metadata_EnhancerAll_surround[
+          enhancer_index, , drop = FALSE
+        ],
+        stringsAsFactors = FALSE
+      )
 
       # QC: enhancer surround
       if (!identical(match.index, seq_len(nrow(G_Enh_surround)))) {
@@ -1175,55 +1236,184 @@ GeneScan3D.KnockoffGeneration <- function(
         G_Enh_surround <- Impute(G_Enh_surround, impute.method)
       }
       MAF       <- .kp_col_means(G_Enh_surround) / 2
-      G_Enh_surround[, MAF > 0.5 & !is.na(MAF)] <-
-        2 - G_Enh_surround[, MAF > 0.5 & !is.na(MAF)]
+      flip_to_minor_enhancer <- MAF > 0.5 & !is.na(MAF)
+      G_Enh_surround[, flip_to_minor_enhancer] <-
+        2 - G_Enh_surround[, flip_to_minor_enhancer, drop = FALSE]
       MAF       <- .kp_col_means(G_Enh_surround) / 2
       variance  <- .kp_col_means(G_Enh_surround^2) -
         .kp_col_means(G_Enh_surround)^2
       SNP.index <- which(MAF > 0 & variance > 0 & !is.na(MAF) & MISS.freq < 0.1)
-      if (length(SNP.index) <= 1) {
-        warning(sprintf("Enhancer %d: variants passing QC <=1; skipping.", r), call. = FALSE)
-        next
-      }
-      G_Enh_surround <- Matrix::Matrix(G_Enh_surround[, SNP.index])
+      G_Enh_surround <- Matrix::Matrix(
+        G_Enh_surround[, SNP.index, drop = FALSE]
+      )
       pos_Enh_filter <- pos_Enh_surround[SNP.index]
-      colnames(G_Enh_surround) <- extract_position_universal(colnames(G_Enh_surround))
+      metadata_Enh_filter <- metadata_Enh_surround[
+        SNP.index, , drop = FALSE
+      ]
+      counted_enhancer <- as.character(metadata_Enh_filter$counted_allele)
+      opposite_enhancer <- ifelse(
+        counted_enhancer == as.character(metadata_Enh_filter$a1),
+        as.character(metadata_Enh_filter$a2),
+        as.character(metadata_Enh_filter$a1)
+      )
+      metadata_Enh_filter$coded_allele <- ifelse(
+        flip_to_minor_enhancer[SNP.index],
+        opposite_enhancer,
+        counted_enhancer
+      )
+      if (ncol(G_Enh_surround) > 0L) {
+        colnames(G_Enh_surround) <-
+          extract_position_universal(colnames(G_Enh_surround))
+      }
       positions_enhancer <- pos_Enh_filter[
         pos_Enh_filter <= Enhancer.pos[r, 2] &
         pos_Enh_filter >= Enhancer.pos[r, 1]
       ]
-      if (length(positions_enhancer) == 0L) {
-        warning(sprintf(
-          "Enhancer %d: no target variant after GeneScan3DKnock QC; skipping.",
-          r
-        ), call. = FALSE)
+      enhancer_seed <- .derive_unit_seed(knockoff_seed, "enhancer", r)
+      enhancer_context <- if (persistent_knockoff) {
+        .make_knockoff_context(
+          test_type = "Gene_Centric_GLM_Enhancer",
+          M = M,
+          genome_build = genome_build,
+          variant_metadata = metadata_Enh_filter,
+          reference_id = enhancer_reference_id,
+          construction_id = paste0(
+            "GeneScan3DKnock-enhancer-v1;impute=fixed;corr_max=0.75;",
+            "maxBP=10000;corr_base=0.05;thres_ultrarare=25;R2=0.75"
+          ),
+          random_seed = enhancer_seed
+        )
+      } else {
+        list(M = as.integer(M))
+      }
+
+      skip_reason <- if (length(SNP.index) <= 1L) {
+        "qc_variants_le_1"
+      } else if (length(positions_enhancer) == 0L) {
+        "no_target_variant"
+      } else {
+        NA_character_
+      }
+      enhancer_used <- is.na(skip_reason)
+
+      if (isTRUE(load_knockoff)) {
+        payload <- knockoff_object$enhancers[[enhancer_name]]
+        required_payload_fields <- c(
+          "coords", "used", "skipped", "skip_reason", "context",
+          "target_positions", "G_Enhancer_knockoff"
+        )
+        if (!is.list(payload) ||
+            any(!required_payload_fields %in% names(payload))) {
+          stop("Saved enhancer payload is incomplete: ", enhancer_name,
+               " in ", knockoff_file)
+        }
+        if (!identical(as.numeric(payload$coords),
+                       as.numeric(enhancer_coords)) ||
+            !identical(payload$used, enhancer_used) ||
+            !identical(payload$skipped, !enhancer_used) ||
+            !identical(payload$skip_reason, skip_reason) ||
+            !identical(as.numeric(payload$target_positions),
+                       as.numeric(positions_enhancer))) {
+          stop(
+            "Saved enhancer payload is incompatible with the current ",
+            "region/QC result: ", enhancer_name, " in ", knockoff_file,
+            ". Regenerate it."
+          )
+        }
+        .assert_knockoff_context(
+          payload$context,
+          enhancer_context,
+          paste0(knockoff_file, " [", enhancer_name, "]")
+        )
+        G_Enh_knockoff <- payload$G_Enhancer_knockoff
+        if (enhancer_used) {
+          expected_dim <- as.integer(c(
+            M, length(knockoff_object$sample_ids),
+            length(positions_enhancer)
+          ))
+          if (length(dim(G_Enh_knockoff)) != 3L ||
+              !identical(as.integer(dim(G_Enh_knockoff)), expected_dim)) {
+            stop(
+              "Saved enhancer knockoff array has incompatible dimensions: ",
+              enhancer_name, " in ", knockoff_file
+            )
+          }
+          if (!identical(enhancer_row_map, seq_along(matched_ids))) {
+            G_Enh_knockoff <- G_Enh_knockoff[
+              , enhancer_row_map, , drop = FALSE
+            ]
+          }
+        } else if (!is.null(G_Enh_knockoff)) {
+          stop(
+            "Saved skipped enhancer unexpectedly contains a knockoff array: ",
+            enhancer_name, " in ", knockoff_file
+          )
+        }
+      } else if (enhancer_used) {
+        # BUG FIX retained: M follows the caller rather than being hardcoded.
+        G_Enh_knockoff <- .with_local_seed(
+          enhancer_seed,
+          function() {
+            create.MK.AL_Enhancer(
+              X               = G_Enh_surround,
+              pos             = pos_Enh_filter,
+              Enhancer_start  = enhancer_coords[["start"]],
+              Enhancer_end    = enhancer_coords[["end"]],
+              M               = M,
+              corr_max        = 0.75,
+              maxN.neighbor   = Inf,
+              maxBP.neighbor  = 10000,
+              corr_base       = 0.05,
+              n.AL            = floor(10 * n^(1/3) * log(n)),
+              thres.ultrarare = 25,
+              R2.thres        = 0.75
+            )
+          }
+        )
+        expected_dim <- as.integer(c(
+          M, length(matched_ids), length(positions_enhancer)
+        ))
+        if (length(dim(G_Enh_knockoff)) != 3L ||
+            !identical(as.integer(dim(G_Enh_knockoff)), expected_dim)) {
+          stop("Generated enhancer knockoff array has incompatible dimensions: ",
+               enhancer_name)
+        }
+      } else {
+        G_Enh_knockoff <- NULL
+      }
+
+      if (persistent_knockoff && !isTRUE(load_knockoff)) {
+        enhancer_payloads[[enhancer_name]] <- list(
+          coords = enhancer_coords,
+          used = enhancer_used,
+          skipped = !enhancer_used,
+          skip_reason = skip_reason,
+          context = enhancer_context,
+          target_positions = as.numeric(positions_enhancer),
+          G_Enhancer_knockoff = G_Enh_knockoff
+        )
+      }
+
+      if (!enhancer_used) {
+        warning(
+          if (identical(skip_reason, "qc_variants_le_1")) {
+            sprintf("Enhancer %d: variants passing QC <=1; skipping.", r)
+          } else {
+            sprintf(paste0(
+              "Enhancer %d: no target variant after GeneScan3DKnock QC; ",
+              "skipping."
+            ), r)
+          },
+          call. = FALSE
+        )
         next
       }
 
-      # Generate enhancer knockoff fresh (NOT saved)
-      # BUG FIX: was create.MK.AL_Enhancer(..., M=5) — hardcoded
-      G_Enh_knockoff <- .with_local_seed(
-        .derive_unit_seed(knockoff_seed, "enhancer", r),
-        function() {
-          create.MK.AL_Enhancer(
-            X               = G_Enh_surround,          # surround matrix
-            pos             = pos_Enh_filter,
-            Enhancer_start  = as.numeric(Enhancer.pos[r, 1]),
-            Enhancer_end    = as.numeric(Enhancer.pos[r, 2]),
-            M               = M,
-            corr_max        = 0.75,
-            maxN.neighbor   = Inf,
-            maxBP.neighbor  = 10000,
-            corr_base       = 0.05,
-            n.AL            = floor(10 * n^(1/3) * log(n)),
-            thres.ultrarare = 25,
-            R2.thres        = 0.75
-          )
-        }
-      )
+      # Stage 1 only needs the per-enhancer arrays in the saved bundle.
+      if (isTRUE(stage1_only)) next
 
       G_enhancer             <- Matrix::Matrix(
-        G_Enh_surround[, pos_Enh_filter %in% positions_enhancer])
+        G_Enh_surround[, pos_Enh_filter %in% positions_enhancer, drop = FALSE])
       G_EnhancerAll          <- if (is.null(G_EnhancerAll)) G_enhancer else
         cbind(G_EnhancerAll, G_enhancer)
       p_EnhancerAll_out      <- c(p_EnhancerAll_out, length(positions_enhancer))
@@ -1254,6 +1444,30 @@ GeneScan3D.KnockoffGeneration <- function(
       }
     }
   }
+
+  if (isTRUE(save_knockoff) && !isTRUE(load_knockoff) &&
+      !is.null(knockoff_file)) {
+    .atomic_save_rds(
+      list(
+        G_gene_buffer_knockoff = G_gene_buffer_knockoff,
+        sample_ids = matched_ids,
+        snp_pos = positions_gene_buffer,
+        context = current_context,
+        bundle_schema_version = 2L,
+        enhancer_reference_id = current_enhancer_reference_id,
+        enhancers = enhancer_payloads
+      ),
+      path = knockoff_file
+    )
+  }
+
+  # Drop the per-entry manifest once persistence work is complete. Association
+  # below only needs the aligned aggregate arrays.
+  knockoff_object <- NULL
+  enhancer_payloads <- NULL
+
+  # Stage 1 returns only after the complete per-gene bundle is durable.
+  if (isTRUE(stage1_only)) return(invisible(NULL))
 
   # ---- Association tests ---------------------------------------------------
   GeneScan3D.Cauchy <- GeneScan3D(

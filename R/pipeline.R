@@ -15,8 +15,7 @@
 #'   When multiple phenotypes are provided, samples with missing values in
 #'   \emph{any} phenotype or covariate are removed once before any analysis,
 #'   reusable knockoffs are generated and persisted internally on the first
-#'   pass. SNP/window and gene-buffer knockoffs are reused; gene-centric
-#'   enhancer knockoffs are regenerated for each phenotype.
+#'   pass. SNP/window and all gene-centric knockoffs are reused.
 #' @param pheno_id      Character or \code{NULL}. Column name of the sample ID
 #'   in the phenotype file. \code{NULL} assumes rows are already aligned with
 #'   the PLINK \code{.fam} file.
@@ -72,16 +71,14 @@
 #'   \describe{
 #'     \item{\code{"full"}}{(Default) Complete end-to-end pipeline.}
 #'     \item{\code{"stage1_knockoff"}}{Generate and save reusable knockoffs;
-#'       no association testing. In gene-centric mode, this stage saves the
-#'       gene-buffer knockoffs; enhancer knockoffs are generated downstream.
+#'       no association testing. In gene-centric mode, each per-gene file
+#'       contains both gene-buffer and enhancer knockoffs.
 #'       First applies the same phenotype/covariate
 #'       complete-case and PLINK-ID matching rules as a full run, then writes
 #'       a sample-list file for reproducibility. Implies
 #'       \code{save_knockoff = TRUE}.}
-#'     \item{\code{"stage2_analysis"}}{Load pre-generated reusable knockoffs,
-#'       complete the remaining mode-specific computation, and run association
-#'       testing. In gene-centric mode, this includes generating enhancer
-#'       knockoffs. Requires \code{knockoff_dir}.
+#'     \item{\code{"stage2_analysis"}}{Load pre-generated reusable knockoffs
+#'       and run association testing. Requires \code{knockoff_dir}.
 #'       The saved and current character-IID sets must match exactly (row order
 #'       may differ); incompatible sample, variant, or run metadata error.}
 #'   }
@@ -121,7 +118,8 @@
 #' chromosome, variant ID, base position, both alleles, and the coded allele.
 #' The analysis path, \code{M}, genome build, construction settings, and the
 #' identity of the LD-block definition file (Single_Window) or gene-annotation
-#' file (Gene_Centric) are also compared. Missing or obsolete
+#' file (Gene_Centric), including the enhancer-map resources, are also
+#' compared. Missing or obsolete
 #' metadata and any mismatch fail closed with an error.
 #'
 #' \strong{Analysis checkpoints.}
@@ -137,14 +135,13 @@
 #' uses these columns only to establish the sample set and does not fit a null
 #' model. Stage 2 reads the saved sample list, requires an exact character-IID
 #' set match, and reindexes rows if their order differs. In gene-centric mode,
-#' stage 1 saves the reusable gene-buffer knockoffs, while stage 2 constructs
-#' phenotype-specific enhancer knockoffs before association testing.
+#' stage 1 saves both gene-buffer and enhancer knockoffs in one per-gene RDS,
+#' and stage 2 loads them before association testing.
 #'
 #' \strong{Multiple phenotypes.}
 #' Supply a character vector. Samples with missing values in \emph{any}
-#' phenotype or covariate are removed once. SNP/window and gene-buffer
-#' knockoffs are reused, while gene-centric enhancer knockoffs are regenerated
-#' for each phenotype. Per-phenotype output goes to
+#' phenotype or covariate are removed once. SNP/window, gene-buffer, and
+#' enhancer knockoffs are reused. Per-phenotype output goes to
 #' \code{<outdir>/<phenotype_name>/}.
 #'
 #' @return Invisibly returns \code{TRUE} on success.
@@ -1007,6 +1004,10 @@ run_pipeline <- function(
     for (c in unique_chr) {
       message("--- chr ", c, " ---")
       bim_chr <- .read_plink_bim_chr(geno_file, c, plink_path)
+      enhancer_files <- .enhancer_reference_paths(genome_build, c)
+      enhancer_reference_id <- .reference_file_set_id(enhancer_files)
+      abc_df <- data.table::fread(enhancer_files$abc)
+      gh_df <- data.table::fread(enhancer_files$gh)
       chr_ko_dir <- file.path(knockoff_dir, paste0("chr", c))
       .prepare_knockoff_directory(chr_ko_dir, create = TRUE)
 
@@ -1029,15 +1030,14 @@ run_pipeline <- function(
           bim_metadata        = bim_chr,
           plink_keep_file     = plink_keep_file,
           reference_id        = reference_id,
+          enhancer_reference_id = enhancer_reference_id,
           export_switch       = export_switch,
           plink_threads       = plink_threads,
           temp_dir            = temp_dir,
           seed                = seed,
           use_glmm            = !sample_uncorrelated,
-          # Stage 1 persists only gene-buffer knockoffs.  Enhancer references
-          # and genotypes are deliberately left for downstream analysis.
-          abc_df              = NULL,
-          gh_df               = NULL,
+          abc_df              = abc_df,
+          gh_df               = gh_df,
           sparseSigma         = NULL,
           ratio               = NULL,
           user_cores          = user_cores,
@@ -1457,6 +1457,7 @@ run_pipeline <- function(
       require_existing = load_knockoff
     )
     enhancer_files <- .enhancer_reference_paths(genome_build, c)
+    enhancer_reference_id <- .reference_file_set_id(enhancer_files)
     abc_df     <- data.table::fread(enhancer_files$abc)
     gh_df      <- data.table::fread(enhancer_files$gh)
 
@@ -1514,6 +1515,7 @@ run_pipeline <- function(
         bim_metadata        = bim_chr,
         plink_keep_file     = plink_keep_file,
         reference_id        = reference_id,
+        enhancer_reference_id = enhancer_reference_id,
         export_switch       = export_switch,
         plink_threads       = plink_threads,
         temp_dir            = temp_dir,
@@ -1632,6 +1634,18 @@ run_pipeline <- function(
     stop("Unsupported genome build: ", genome_build)
   )
   lapply(filenames, function(filename) .extdata_path(genome_build, filename))
+}
+
+#' Stable identifier for a named set of reference files
+#' @keywords internal
+.reference_file_set_id <- function(paths) {
+  if (!is.list(paths) || length(paths) == 0L || is.null(names(paths)) ||
+      any(!nzchar(names(paths))))
+    stop("'paths' must be a non-empty named list of reference files.")
+  paste(
+    paste0(names(paths), "=", vapply(paths, .reference_file_id, character(1L))),
+    collapse = "|"
+  )
 }
 
 #' Resolve the bundled or user-supplied LD-block resource

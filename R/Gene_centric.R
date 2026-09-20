@@ -4,8 +4,7 @@
 #   plink_threads, temp_dir.
 #
 # knockoff_dir is the chr-level subdirectory (e.g. <knockoff_root>/chr1/).
-# One RDS file per gene is written there for the gene_buffer knockoff only.
-# Enhancer knockoffs are generated during downstream analysis and are not saved.
+# One RDS file per gene stores both the gene-buffer and enhancer knockoffs.
 # ----------------------------------------------------------------------------
 .gene_region_spec <- function(use_glmm) {
   if (!is.logical(use_glmm) || length(use_glmm) != 1L || is.na(use_glmm))
@@ -84,6 +83,83 @@
 }
 
 
+.normalize_knockoff_reference_id <- function(reference_id) {
+  if (is.null(reference_id)) NA_character_ else as.character(reference_id)
+}
+
+
+.load_gene_knockoff_bundle <- function(
+  knockoff_file, matched_ids, enhancer_reference_id, n_enhancers,
+  method_label = "gene-centric"
+) {
+  if (is.null(knockoff_file) || !file.exists(knockoff_file))
+    stop("Required saved knockoff file not found: ", knockoff_file)
+
+  object <- readRDS(knockoff_file)
+  if (!identical(object$bundle_schema_version, 2L)) {
+    stop(
+      "Saved ", method_label,
+      " bundle is missing or uses an obsolete schema: ", knockoff_file,
+      ". Regenerate it with the current package version."
+    )
+  }
+  if (!identical(
+    object$enhancer_reference_id,
+    .normalize_knockoff_reference_id(enhancer_reference_id)
+  )) {
+    stop(
+      "Saved ", method_label,
+      " bundle is incompatible with the current enhancer reference: ",
+      knockoff_file, ". Regenerate it."
+    )
+  }
+
+  expected_names <- if (n_enhancers > 0L) {
+    sprintf("enhancer_%04d", seq_len(n_enhancers))
+  } else {
+    character(0)
+  }
+  if (!is.list(object$enhancers) ||
+      !identical(names(object$enhancers), expected_names)) {
+    stop(
+      "Saved ", method_label,
+      " bundle has a different ordered enhancer set: ", knockoff_file,
+      ". Regenerate it."
+    )
+  }
+
+  current_ids <- as.character(matched_ids)
+  saved_ids <- as.character(object$sample_ids)
+  if (is.null(object$sample_ids) || anyNA(saved_ids) ||
+      anyDuplicated(saved_ids) || anyNA(current_ids) ||
+      anyDuplicated(current_ids)) {
+    stop(
+      "Saved/current sample IDs must be present, unique, and non-missing: ",
+      knockoff_file
+    )
+  }
+  if (.need_regenerate_samples(current_ids, saved_ids)) {
+    stop(
+      "Saved knockoff cannot be reused because its sample-ID set differs ",
+      "from the current run: ", knockoff_file,
+      ". Regenerate knockoffs for the exact analysis sample set."
+    )
+  }
+  gene_array <- object$G_gene_buffer_knockoff
+  if (length(dim(gene_array)) != 3L ||
+      dim(gene_array)[2L] != length(saved_ids)) {
+    stop("Saved gene knockoff array has incompatible sample rows: ",
+         knockoff_file)
+  }
+
+  list(
+    object = object,
+    row_map = match(current_ids, saved_ids),
+    reference_id = .normalize_knockoff_reference_id(enhancer_reference_id)
+  )
+}
+
+
 run_batch_gene <- function(
   genes,
   b,
@@ -98,6 +174,7 @@ run_batch_gene <- function(
   bim_metadata,
   plink_keep_file     = NULL,
   reference_id        = NULL,
+  enhancer_reference_id = NULL,
   seed                = NULL,
   use_glmm            = FALSE,
   abc_df,
@@ -176,14 +253,15 @@ run_batch_gene <- function(
   # Enhancers are independent genomic intervals and may be far outside the
   # gene-batch envelope.  Build a per-gene map in stable ABC-then-GH order,
   # then export the union of the required enhancer variants in one PLINK call.
-  # Stage 1 stops after gene-buffer knockoff generation and therefore performs
-  # no enhancer lookup or genotype I/O.
+  # Stage 1 performs this work as well, because enhancer knockoffs are part of
+  # the reusable per-gene bundle.
   empty_enhancers <- data.table::data.table(start = numeric(), end = numeric())
   enhancers_by_gene <- rep(list(empty_enhancers), length(kk_vec))
   G_enhancer_batch <- NULL
   variants_enhancer_batch <- numeric(0)
+  variant_metadata_enhancer_batch <- NULL
 
-  if (!isTRUE(stage1_only)) {
+  {
     enhancers_by_gene <- lapply(kk_vec, function(kk) {
       .eligible_gene_enhancers(
         .gene_enhancers(genes[kk, id], abc_df, gh_df),
@@ -279,6 +357,8 @@ run_batch_gene <- function(
       G_enhancer_batch <- enhancer_prepared$geno
       variants_enhancer_batch <-
         as.numeric(enhancer_prepared$variant_metadata$pos)
+      variant_metadata_enhancer_batch <-
+        enhancer_prepared$variant_metadata
       colnames(G_enhancer_batch) <- as.character(variants_enhancer_batch)
       rm(enhancer_raw, enhancer_prepared)
       unlink(enhancer_files, force = TRUE)
@@ -296,7 +376,7 @@ run_batch_gene <- function(
         seed, "Gene_Centric", chr, as.character(gene_id)
       )
 
-      # Knockoff file path for this gene (gene_buffer knockoff only)
+      # One atomic file stores this gene's buffer and enhancer knockoffs.
       ko_file <- if (!is.null(knockoff_dir))
         file.path(knockoff_dir,
                   paste0("gene_", gsub("[^a-zA-Z0-9._-]", "_", gene_id), "_ko.rds"))
@@ -331,6 +411,7 @@ run_batch_gene <- function(
       Enhancer.pos                  <- NULL
       p_EnhancerAll_surround        <- NULL
       p_EnhancerAll                 <- NULL
+      variant_metadata_EnhancerAll_surround <- NULL
       R <- 0
 
       if (nrow(enhancers) > 0L && !is.null(G_enhancer_batch)) {
@@ -360,6 +441,8 @@ run_batch_gene <- function(
           p_EnhancerAll_surround <- lengths(surround_index)
           p_EnhancerAll <- target_count
           Enhancer.pos <- as.matrix(enhancers[, .(start, end)])
+          variant_metadata_EnhancerAll_surround <-
+            variant_metadata_enhancer_batch[flat_index, , drop = FALSE]
           R <- nrow(enhancers)
         }
       }
@@ -381,8 +464,11 @@ run_batch_gene <- function(
           M                             = M,
           Gsub.id                       = Gsub.id,
           variant_metadata_gene_buffer_surround = variant_metadata_gene,
+          variant_metadata_EnhancerAll_surround =
+            variant_metadata_EnhancerAll_surround,
           genome_build                  = genome_build,
           reference_id                  = reference_id,
+          enhancer_reference_id         = enhancer_reference_id,
           knockoff_seed                 = knockoff_seed,
           save_knockoff                 = save_this_gene,
           load_knockoff                 = load_this_gene,
@@ -409,8 +495,11 @@ run_batch_gene <- function(
           ratio                         = ratio,
           glmm_precomputed              = glmm_precomputed,
           variant_metadata_gene_buffer_surround = variant_metadata_gene,
+          variant_metadata_EnhancerAll_surround =
+            variant_metadata_EnhancerAll_surround,
           genome_build                  = genome_build,
           reference_id                  = reference_id,
+          enhancer_reference_id         = enhancer_reference_id,
           knockoff_seed                 = knockoff_seed,
           save_knockoff                 = save_this_gene,
           load_knockoff                 = load_this_gene,
@@ -480,14 +569,16 @@ run_batch_gene <- function(
   p_expected,    # number of SNPs in gene buffer after QC (current run)
   gen_fun,       # zero-arg function that returns the knockoff array
   snp_pos,       # current SNP positions for saving
-  context
+  context,
+  knockoff_object = NULL
 ) {
   need_generate <- TRUE
 
   if (isTRUE(load_knockoff)) {
     if (is.null(knockoff_file) || !file.exists(knockoff_file))
       stop("Required saved knockoff file not found: ", knockoff_file)
-    ko_obj <- readRDS(knockoff_file)
+    ko_obj <- if (is.null(knockoff_object))
+      readRDS(knockoff_file) else knockoff_object
     .assert_knockoff_context(ko_obj$context, context, knockoff_file)
     arr <- ko_obj$G_gene_buffer_knockoff
     if (length(dim(arr)) != 3L || dim(arr)[1L] != context$M ||
