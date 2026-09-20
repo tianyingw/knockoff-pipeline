@@ -71,6 +71,21 @@ test_that("stage 1 persists and stage 2 always loads without cleanup", {
 })
 
 
+test_that("gene-centric stages use the same genomic gene order", {
+  genes <- data.table::data.table(
+    id = c("late", "other_chr", "early", "middle"),
+    chr = c(19L, 1L, 19L, 19L),
+    start = c(300L, 1L, 100L, 200L),
+    end = c(350L, 50L, 150L, 250L)
+  )
+
+  ordered <- KnockoffPipeline:::.ordered_chr_genes(genes, 19L)
+
+  expect_identical(as.character(ordered$id), c("early", "middle", "late"))
+  expect_identical(as.integer(ordered$start), c(100L, 200L, 300L))
+})
+
+
 test_that("stage 1 requires phenotype inputs to define complete cases", {
   expect_error(
     run_pipeline(

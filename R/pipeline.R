@@ -897,6 +897,12 @@ run_pipeline <- function(
 # Dispatches to Single_Window or Gene_Centric generation helpers.
 # =============================================================================
 
+.ordered_chr_genes <- function(genes_info, chromosome) {
+  chr_genes <- genes_info[which(genes_info$chr == chromosome), ]
+  chr_genes[order(chr_genes$start), ]
+}
+
+
 .run_knockoff_generation <- function(
   test_type, geno_file, Gsub.id, knockoff_dir, chr_vector,
   M, seed, genome_build, sliding_window_length, geno_missing_imputation,
@@ -980,7 +986,7 @@ run_pipeline <- function(
       chr_ko_dir <- file.path(knockoff_dir, paste0("chr", c))
       .prepare_knockoff_directory(chr_ko_dir, create = TRUE)
 
-      chr_genes <- genes_info[chr == c]
+      chr_genes <- .ordered_chr_genes(genes_info, c)
       enhancer_files <- .enhancer_reference_paths(genome_build, c)
       abc_df    <- data.table::fread(enhancer_files$abc)
       gh_df     <- data.table::fread(enhancer_files$gh)
@@ -1420,8 +1426,7 @@ run_pipeline <- function(
       message("  Existing intermediate file found -- skipping chr ", c); next
     }
 
-    chr_genes  <- genes_info[chr == c]
-    chr_genes <- chr_genes[order(chr_genes$start), ]
+    chr_genes <- .ordered_chr_genes(genes_info, c)
     chr_ko_dir <- file.path(knockoff_dir, paste0("chr", c))
     .prepare_knockoff_directory(
       chr_ko_dir,
