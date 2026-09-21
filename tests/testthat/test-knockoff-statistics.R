@@ -145,7 +145,7 @@ test_that("GeneScan3DKnock uses conservative ties and shared q formulas", {
 })
 
 
-test_that("missing tests are non-discoveries and zero p-values stay finite", {
+test_that("missing tests are non-discoveries and zero p-values retain infinity", {
   missing <- KnockoffPipeline:::GeneScan3DKnock(
     M = 2L, p0 = 1e-8, p_ko = matrix(c(0.5, NA), nrow = 1L),
     gene_id = "missing"
@@ -158,12 +158,29 @@ test_that("missing tests are non-discoveries and zero p-values stay finite", {
     M = 2L, p0 = 0, p_ko = matrix(c(0.5, 0.5), nrow = 1L),
     fdr = 0.5, gene_id = "underflow"
   )
-  expect_true(is.finite(underflow$W))
-  expect_true(is.finite(underflow$W.threshold))
+  expect_identical(underflow$W, Inf)
+  expect_identical(underflow$W.threshold, Inf)
   expect_equal(underflow$Qvalue, 0.5)
-  expect_true(is.finite(KnockoffPipeline:::MK.threshold.byStat(
-    kappa = 0, tau = Inf, M = 2L, fdr = 0.5
-  )))
+  expect_identical(
+    KnockoffPipeline:::MK.threshold.byStat(
+      kappa = 0, tau = Inf, M = 2L, fdr = 0.5
+    ),
+    Inf
+  )
+
+  stat <- KnockoffPipeline:::MK.statistic(
+    Inf, matrix(c(-log10(0.5), -log10(0.5)), nrow = 1L),
+    method = "median"
+  )
+  expect_identical(unname(stat[1L, "kappa"]), 0)
+  expect_identical(unname(stat[1L, "tau"]), Inf)
+
+  knockoff_underflow <- KnockoffPipeline:::GeneScan3DKnock(
+    M = 2L, p0 = 0.5, p_ko = matrix(c(0, 0.5), nrow = 1L),
+    fdr = 0.5, gene_id = "knockoff_underflow"
+  )
+  expect_identical(knockoff_underflow$W, 0)
+  expect_identical(knockoff_underflow$Qvalue, 1)
 })
 
 

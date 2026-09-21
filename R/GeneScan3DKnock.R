@@ -1554,13 +1554,13 @@ GeneScan3DKnock<-function(M=5,p0=GeneScan3DKnock.example$GeneScan3D.original,
            call. = FALSE)
    }
    #calculate knockoff statistics W, kappa, tau for given original p-value and M knockoff p-values
-   T=-log10(pmax(p,.Machine$double.xmin))
+   T=-log10(p)
 
    stat=MK.statistic(T[,1],T[,2:(M+1),drop=FALSE],method='median')
    kappa=stat[,'kappa']
    tau=stat[,'tau']
    W=tau*(kappa==0)
-   W[!is.finite(W)]=0
+   W[is.na(W)]=0
    Rej.Bound=10000
    qvalue=MK.q.byStat(kappa,tau,M=M,Rej.Bound=Rej.Bound)
    #W statistics threshold

@@ -149,7 +149,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
 
       MK.stat<-MK.statistic(-log10(p.common),-log10(p.common_k),method='median')
       W<-MK.stat[,'tau']*(MK.stat[,'kappa']==0)
-      W[!is.finite(W)]<-0
+      W[is.na(W)]<-0
       temp.summary.single<-cbind(chr,pos[common.index],pos[common.index],
                                  pos[common.index],pos[common.index],
                                  (beta!=0)[common.index],
@@ -223,7 +223,7 @@ KS.chr<-function(result.prelim,input.X,window.bed,beta=NULL,input.G_k=NULL,regio
       #Knockoff statistics
       MK.stat<-MK.statistic(-log10(p.A),-log10(p.A_k),method='median')
       W<-MK.stat[,'tau']*(MK.stat[,'kappa']==0)
-      W[!is.finite(W)]<-0
+      W[is.na(W)]<-0
 
       temp.summary.window<-cbind(chr,window.summary,
                                  c(t(beta.rare!=0)%*%window.matrix0!=0),
@@ -654,11 +654,6 @@ MK.statistic<-function (T_0,T_k,method='median'){
   T.temp<-cbind(T_0,T_k)
   invalid <- apply(is.na(T.temp) | is.nan(T.temp) |
                      (is.infinite(T.temp) & T.temp < 0), 1, any)
-  # Association-test p-values can underflow to zero.  Retain their ordering
-  # without allowing an infinite W to collide with Inf's use as the
-  # no-rejection threshold sentinel.
-  T.temp[is.infinite(T.temp) & T.temp > 0] <-
-    -log10(.Machine$double.xmin)
   if (any(invalid)) T.temp[invalid, ] <- 0
 
   which.max.alt<-function(x){
@@ -697,10 +692,6 @@ MK.statistic<-function (T_0,T_k,method='median'){
   if (any(is.infinite(tau) & tau < 0, na.rm = TRUE))
     stop("Non-missing tau values cannot be negative infinity.",
          call. = FALSE)
-  # Positive infinity can occur in older intermediate files when a p-value
-  # underflowed to zero.  Use the same finite cap as MK.statistic so that Inf
-  # remains reserved for the no-rejection threshold sentinel.
-  tau[is.infinite(tau) & tau > 0] <- -log10(.Machine$double.xmin)
   eligible <- which(!is.na(kappa) & !is.na(tau) & tau > 0)
   if (length(eligible) == 0L)
     return(list(index = integer(), group = integer(), threshold = numeric(),
