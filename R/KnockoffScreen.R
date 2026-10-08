@@ -625,7 +625,7 @@ Get.p<-function(X,result.prelim){
   outcome<-result.prelim$out_type
   if(outcome=='D'){
     invisible(capture.output(
-      p <- WGScan::ScoreTest_SPA(
+      p <- SPAtest::ScoreTest_SPA(
         t(X), result.prelim$Y, result.prelim$X0,
         method = c("fastSPA"), minmac = -Inf
       )$p.value

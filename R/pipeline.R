@@ -50,6 +50,8 @@
 #'   selects the BIGKnock/SAIGE GLMM path for \code{"Gene_Centric"}.
 #'   \code{"Single_Window"} currently accepts \code{TRUE} only.
 #' @param grm_file      Character or \code{NULL}. Path to the sparse GRM file.
+#'   When \code{NULL}, automatic construction uses the same retained
+#'   phenotype/covariate complete-case sample set as the association model.
 #' @param grm_id_file   Character or \code{NULL}. Path to the sparse GRM ID
 #'   file.
 #' @param relatedness_cutoff Numeric. SAIGE sparse-GRM relatedness cutoff.
@@ -554,6 +556,7 @@ run_pipeline <- function(
           covar_cols         = covar_cols,
           cat_covar_cols     = cat_covar_cols,
           output_prefix      = file.path(p_outdir, "saige_output"),
+          plink_keep_file    = plink_keep_file,
           sparse_grm_file    = grm_file,
           sparse_grm_id_file = grm_id_file,
           n_threads          = user_cores,

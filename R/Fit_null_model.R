@@ -99,6 +99,48 @@ Fit_null_model<-function(Y, X=NULL, id=NULL, out_type="C", resampling=FALSE,B=10
   out
 }
 
+
+.saige_plink_export_plan <- function(
+  plink_prefix, plink_file, out_prefix, total_markers,
+  thin_target_markers, plink_keep_file = NULL, random_seed = NULL
+) {
+  thin_markers <- total_markers > as.integer(thin_target_markers)
+  subset_samples <- !is.null(plink_keep_file)
+
+  if (!thin_markers && !subset_samples) {
+    return(list(
+      command = NULL, thin_markers = FALSE, subset_samples = FALSE
+    ))
+  }
+
+  command <- c(
+    shQuote(plink_prefix), "--bfile", shQuote(plink_file)
+  )
+  if (subset_samples) {
+    command <- c(command, "--keep", shQuote(plink_keep_file))
+  }
+  if (thin_markers) {
+    thin_fraction <- as.integer(thin_target_markers) / total_markers
+    command <- c(
+      command, "--thin",
+      format(thin_fraction, scientific = FALSE, trim = TRUE)
+    )
+    if (!is.null(random_seed)) {
+      command <- c(command, "--seed", as.integer(random_seed))
+    }
+  }
+  command <- c(
+    command, "--make-bed", "--out", shQuote(out_prefix), "--silent"
+  )
+
+  list(
+    command = paste(command, collapse = " "),
+    thin_markers = thin_markers,
+    subset_samples = subset_samples
+  )
+}
+
+
 Fit_null_model_GLMM <- function(plink_file,
                                 pheno_file,
                                 pheno_col,
@@ -116,7 +158,8 @@ Fit_null_model_GLMM <- function(plink_file,
                                 min_maf_for_grm = 0.01,
                                 max_missing_rate_for_grm = 0.15,
                                 relatedness_cutoff = 0.125,
-                                random_seed = NULL) {
+                                random_seed = NULL,
+                                plink_keep_file = NULL) {
   # if ("package:SAIGE" %in% search()) {
   #   try(closeGenoFile_plink(), silent = TRUE)
   # }
@@ -137,6 +180,13 @@ Fit_null_model_GLMM <- function(plink_file,
   if (xor(is.null(sparse_grm_file), is.null(sparse_grm_id_file))) {
     stop("sparse_grm_file and sparse_grm_id_file must be supplied together")
   }
+  if (!is.null(plink_keep_file)) {
+    if (!is.character(plink_keep_file) || length(plink_keep_file) != 1L ||
+        is.na(plink_keep_file) || !nzchar(plink_keep_file) ||
+        !file.exists(plink_keep_file)) {
+      stop("'plink_keep_file' must be NULL or an existing PLINK keep file")
+    }
+  }
   if (!is.numeric(thin_target_markers) || length(thin_target_markers) != 1L || thin_target_markers < 1) {
     stop("'thin_target_markers' must be a positive integer")
   }
@@ -147,7 +197,6 @@ Fit_null_model_GLMM <- function(plink_file,
   trait_type <- ifelse(outcome_type == "D", 'binary', 'quantitative')
   output_prefix <- normalizePath(output_prefix, winslash = "/", mustWork = FALSE)
   grm_prefix <- file.path(output_prefix, "GRM")
-  thin_path <- file.path(output_prefix, "thinned")
   total_markers <- nrow(data.table::fread(paste0(plink_file, ".bim"), header = FALSE, select = 1L, showProgress = FALSE))
   analysis_prefix <- plink_file
 
@@ -185,30 +234,44 @@ Fit_null_model_GLMM <- function(plink_file,
   }
   dir.create(output_prefix, recursive = TRUE, showWarnings = FALSE)
 
-  if (total_markers > as.integer(thin_target_markers)) {
-    thin_fraction <- as.integer(thin_target_markers) / total_markers
-    message(sprintf(
-      "Thinning PLINK markers from %d to about %d (fraction %.6f).",
-      total_markers, as.integer(thin_target_markers), thin_fraction
-    ))
-    seed_arg <- if (is.null(random_seed)) "" else
-      paste("--seed", as.integer(random_seed))
-    thin_status <- system(sprintf(
-      "%s --bfile %s --thin %s %s --make-bed --out %s --silent",
-      shQuote(plink_prefix),
-      shQuote(plink_file),
-      format(thin_fraction, scientific = FALSE, trim = TRUE),
-      seed_arg,
-      shQuote(thin_path)
-    ))
-    if (!identical(thin_status, 0L) ||
-        !all(file.exists(paste0(thin_path, c(".bed", ".bim", ".fam"))))) {
-      stop("PLINK failed while creating the marker-thinned dataset for SAIGE.")
+  prepared_path <- tempfile("grm_input_", tmpdir = output_prefix)
+  plink_plan <- .saige_plink_export_plan(
+    plink_prefix = plink_prefix,
+    plink_file = plink_file,
+    out_prefix = prepared_path,
+    total_markers = total_markers,
+    thin_target_markers = thin_target_markers,
+    plink_keep_file = plink_keep_file,
+    random_seed = random_seed
+  )
+
+  if (!is.null(plink_plan$command)) {
+    if (plink_plan$thin_markers) {
+      thin_fraction <- as.integer(thin_target_markers) / total_markers
+      message(sprintf(
+        "Thinning PLINK markers from %d to about %d (fraction %.6f).",
+        total_markers, as.integer(thin_target_markers), thin_fraction
+      ))
     }
-    analysis_prefix <- thin_path
+    if (plink_plan$subset_samples) {
+      message("Restricting the SAIGE PLINK input to the retained analysis samples.")
+    }
+    on.exit(
+      unlink(
+        paste0(prepared_path, c(".bed", ".bim", ".fam", ".log", ".nosex", ".hh")),
+        force = TRUE
+      ),
+      add = TRUE
+    )
+    prepare_status <- system(plink_plan$command)
+    if (!identical(prepare_status, 0L) ||
+        !all(file.exists(paste0(prepared_path, c(".bed", ".bim", ".fam"))))) {
+      stop("PLINK failed while preparing the analysis input for SAIGE.")
+    }
+    analysis_prefix <- prepared_path
   } else {
     message(sprintf(
-      "PLINK file has %d markers only; skipping thinning and using the original dataset.",
+      "PLINK file has %d markers and already contains the retained samples; using it directly.",
       total_markers
     ))
   }
@@ -234,6 +297,13 @@ Fit_null_model_GLMM <- function(plink_file,
     tryCatch(
       create_sparse_grm_once(analysis_prefix),
       error = function(e) {
+        if (!is.null(plink_keep_file)) {
+          stop(
+            "Sparse GRM creation failed on the retained analysis samples: ",
+            conditionMessage(e),
+            call. = FALSE
+          )
+        }
         if (analysis_prefix == plink_file) {
           stop(e)
         }

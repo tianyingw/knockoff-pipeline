@@ -101,11 +101,16 @@ test_that("binary single-variant scores use the fitted null-model design", {
   y <- rbinom(n, 1L, 0.4)
   null <- KnockoffPipeline:::Fit_null_model(y, out_type = "D")
 
+  expected <- SPAtest::ScoreTest_SPA(
+    t(x), null$Y, null$X0,
+    method = "fastSPA", minmac = -Inf
+  )$p.value
   observed <- KnockoffPipeline:::Get.p(
     Matrix::Matrix(x, sparse = TRUE), null
   )
 
   expect_equal(dim(observed), c(ncol(x), 1L))
+  expect_equal(as.numeric(observed), expected, tolerance = 1e-12)
   expect_true(all(is.finite(observed)))
   expect_true(all(observed >= 0 & observed <= 1))
 })

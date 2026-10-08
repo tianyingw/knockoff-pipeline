@@ -99,7 +99,9 @@ standard GLM and does not test or prune sample relatedness; \code{FALSE}
 selects the BIGKnock/SAIGE GLMM path for \code{"Gene_Centric"}.
 \code{"Single_Window"} currently accepts \code{TRUE} only.}
 
-\item{grm_file}{Character or \code{NULL}. Path to the sparse GRM file.}
+\item{grm_file}{Character or \code{NULL}. Path to the sparse GRM file.
+When \code{NULL}, automatic construction uses the same retained
+phenotype/covariate complete-case sample set as the association model.}
 
 \item{grm_id_file}{Character or \code{NULL}. Path to the sparse GRM ID
 file.}

@@ -761,7 +761,7 @@ Get.p<-function(X,result.null.model){
    outcome<-result.null.model$out_type
    if(outcome=='D'){
       invisible(capture.output(
-         p <- WGScan::ScoreTest_SPA(
+         p <- SPAtest::ScoreTest_SPA(
             t(X), result.null.model$Y, result.null.model$X,
             method = c("fastSPA"), minmac = -Inf
          )$p.value

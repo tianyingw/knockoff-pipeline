@@ -161,7 +161,7 @@ run_pipeline(
 | `genome_build`            | `"hg19"` or `"hg38"`                                                                             | `"hg19"`              |
 | `ld_block_file`           | Ancestry-matched LD blocks with `chr`, `start`, and `stop` columns (`Single_Window` only); `NULL` uses the bundled European-ancestry resource for the selected build | `NULL` |
 | `sample_uncorrelated`     | Model-path selector: `TRUE` = standard GLM (does not test or prune relatedness); `FALSE` = BIGKnock/SAIGE GLMM for `Gene_Centric`; `Single_Window` currently accepts `TRUE` only | `TRUE` |
-| `grm_file`                | Optional existing sparse GRM for `sample_uncorrelated = FALSE`; `NULL` constructs one            | `NULL`                |
+| `grm_file`                | Optional existing sparse GRM for `sample_uncorrelated = FALSE`; `NULL` constructs one on the retained phenotype/covariate complete-case sample set | `NULL` |
 | `grm_id_file`             | Sample-ID file paired with a supplied sparse GRM                                                 | `NULL`                |
 | `relatedness_cutoff`      | Relatedness cutoff used when SAIGE constructs a sparse GRM                                      | `0.125`               |
 | `n_markers_grm`           | Number of randomly selected markers used when SAIGE constructs a sparse GRM                     | `1000`                |
