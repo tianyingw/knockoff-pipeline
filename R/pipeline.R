@@ -513,7 +513,7 @@ run_pipeline <- function(
       geno_missing_imputation = geno_missing_imputation,
       sample_uncorrelated = sample_uncorrelated,
       relatedness_cutoff = relatedness_cutoff,
-      n_markers_grm = n_markers_grm, fdr = fdr,
+      n_markers_grm = n_markers_grm,
       sources = checkpoint_sources
     )
     .prepare_analysis_checkpoint(
@@ -813,7 +813,7 @@ run_pipeline <- function(
   test_type, phenotype, sample_ids, pheno_id, covar_cols, cat_covar_cols,
   out_type, M, seed, genome_build, sliding_window_length,
   geno_missing_imputation, sample_uncorrelated, relatedness_cutoff,
-  n_markers_grm, fdr, sources
+  n_markers_grm, sources
 ) {
   context <- list(
     # Version 2 invalidates checkpoints written before the corrected Single
@@ -834,7 +834,6 @@ run_pipeline <- function(
     sample_uncorrelated = isTRUE(sample_uncorrelated),
     relatedness_cutoff = as.double(relatedness_cutoff),
     n_markers_grm = as.integer(n_markers_grm),
-    fdr = as.double(fdr),
     sources = sources
   )
 

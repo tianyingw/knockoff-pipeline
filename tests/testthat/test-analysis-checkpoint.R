@@ -23,7 +23,7 @@ test_that("generated analysis contexts use the current algorithm schema", {
     cat_covar_cols = character(), out_type = "C", M = 5L, seed = 17L,
     genome_build = "hg19", sliding_window_length = c(1000, 5000),
     geno_missing_imputation = "fixed", sample_uncorrelated = TRUE,
-    relatedness_cutoff = 0.125, n_markers_grm = 1000L, fdr = 0.1,
+    relatedness_cutoff = 0.125, n_markers_grm = 1000L,
     sources = list()
   )
   context <- do.call(
@@ -31,6 +31,7 @@ test_that("generated analysis contexts use the current algorithm schema", {
   )
 
   expect_identical(context$schema_version, 2L)
+  expect_false("fdr" %in% names(context))
   expect_false("gene_region_loading" %in% names(context))
 
   gene_glm <- do.call(
